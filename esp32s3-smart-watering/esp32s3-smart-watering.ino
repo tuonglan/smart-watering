@@ -12,10 +12,23 @@
 //   V6  Time On 1        (read-only display, seconds elapsed)
 //   V7  Run Max 1        (toggle: run to MAX_RUNNING_TIME)
 //   V8  Uptime           (String "2d 03h 14m", updated every 10 min, read-only)
+//   V9  Device datetime  (String "YYYY-MM-DD HH:MM:SS +07" local, every 5 min, read-only)
+//   V10 Schedule config  (String, app→device — see format below)
 //
 // Relay index = vpin / 4 , pin offset = vpin % 4
+//
+// Schedule config (V10):  <relay0>|<relay1>     (at most one '|')
+//   - no '|' -> relay 0 only;  leading '|' -> relay 1 only;  empty -> no schedule
+//   - per relay:  <day>[,<day>]*;<time>[,<time>]*
+//       day  : Mon Tue Wed Thu Fri Sat Sun (case-insensitive) or '*' = every day
+//       time : HH:MM:SS or HH:MM (seconds default 0)
+//   - example:  "Mon,Tue,Wed,Fri;10:30:00,16:30:30"  or  "*;06:00|*;06:05"
+//   - a malformed side is echoed back as "INVALID FORMAT" and that relay is disabled
+//   A scheduled start uses that relay's Running Time (V1/V5) and the same 300 s
+//   ceiling + failsafe as a manual start. Starts only fire once the clock is
+//   NTP-valid; until then V9 shows "SYNCING...".
 
-#define BLYNK_FIRMWARE_VERSION  "1.0.1"
+#define BLYNK_FIRMWARE_VERSION  "1.1.0"
 #define BLYNK_PRINT             Serial
 #define APP_DEBUG
 
@@ -29,6 +42,16 @@
 #include "Settings.h"
 #include "BlynkEdgent.h"
 #include "esp_timer.h"   // hardware-backed failsafe timer (independent of loop())
+
+// ------------------------------------------------------------------ //
+//  Scheduling configuration (override the header-file defaults here)   //
+// ------------------------------------------------------------------ //
+#define SCHED_TZ          "<+07>-7"   // Vietnam, UTC+7, no DST (POSIX sign is inverted)
+#define SCHED_TZ_SUFFIX   "+07"       // appended to the V9 datetime string
+#define MAX_LATENESS_S    600         // skip a scheduled start more than 10 min late
+
+#include "TimeManager.h"  // NTP wall-clock (Blynk-free)
+#include "Schedule.h"     // schedule parsing + per-second engine (Blynk-free)
 
 // ------------------------------------------------------------------ //
 //  Hardware pin for each relay                                         //
@@ -114,6 +137,17 @@ public:
     }
   }
 
+  bool isOn() const { return _relay_on; }
+
+  // Start a timed run from the scheduler. Identical to a manual switch-on (same
+  // Running Time, same 300 s ceiling + 3-layer failsafe), and reflects the run in
+  // the app. The caller is responsible for skipping this when already running.
+  void startScheduled() {
+    if (_relay_on || _run_max) return;
+    _turnOn();
+    Blynk.virtualWrite(_vpin_switch, 1);
+  }
+
 private:
   uint8_t  _idx;
   uint8_t  _gpio;
@@ -142,6 +176,13 @@ private:
   void _enable_relay() {
     digitalWrite(_gpio, HIGH);
     _relay_on = true;
+  }
+
+  // Energise the relay and arm the timers for the configured Running Time. Shared by
+  // the manual switch handler and the scheduler so both paths behave identically.
+  void _turnOn() {
+    _enable_relay();
+    _start_timers((uint32_t)_running_time_s * 1000UL);
   }
 
   void _disable_relay() {
@@ -234,8 +275,7 @@ private:
     }
 
     if (value == 1) {
-      _enable_relay();
-      _start_timers((uint32_t)_running_time_s * 1000UL);
+      _turnOn();
     } else {
       _shutdown(false);
     }
@@ -275,6 +315,17 @@ RelayController relays[2];
 BlynkTimer      mainTimer;
 uint32_t        boot_ms;
 
+TimeManager     timeMgr;
+ScheduleManager schedMgr;
+bool            g_time_was_valid = false;   // rising-edge latch for first NTP sync
+
+// Scheduler asks us to start a relay; we honour the "skip if already running" rule.
+static void onScheduleTrigger(uint8_t relay_idx, void * /*ctx*/) {
+  if (relay_idx < 2 && !relays[relay_idx].isOn()) {
+    relays[relay_idx].startScheduled();
+  }
+}
+
 // ------------------------------------------------------------------ //
 //  Blynk callbacks                                                     //
 // ------------------------------------------------------------------ //
@@ -289,7 +340,21 @@ BLYNK_WRITE_DEFAULT() {
 
 // Sync Blynk widgets to device state after reconnect
 BLYNK_CONNECTED() {
-  Blynk.syncVirtual(V0, V1, V2, V3, V4, V5, V6, V7);
+  // WiFi is up here — (re)start NTP. Idempotent.
+  timeMgr.begin();
+  // V10 restores the stored schedule (triggers BLYNK_WRITE(V10) below).
+  Blynk.syncVirtual(V0, V1, V2, V3, V4, V5, V6, V7, V10);
+}
+
+// Schedule config from the app. Parse, (re)arm, and echo "INVALID FORMAT" back for
+// any malformed side so the user sees the rejection.
+BLYNK_WRITE(V10) {
+  char echo[2 * SCHED_SIDE_LEN + 2];
+  bool rewrite = schedMgr.apply(param.asStr(), echo, sizeof(echo),
+                                timeMgr.now(), timeMgr.valid());
+  if (rewrite) {
+    Blynk.virtualWrite(V10, echo);
+  }
 }
 
 // ------------------------------------------------------------------ //
@@ -313,6 +378,30 @@ void uptimeEvent() {
 }
 
 // ------------------------------------------------------------------ //
+//  Time + scheduling ticks                                             //
+// ------------------------------------------------------------------ //
+
+// Push the device's local datetime to V9 (or "SYNCING..." until NTP is valid).
+void datetimeEvent() {
+  char buf[32];
+  timeMgr.formatLocal(buf, sizeof(buf));   // writes "SYNCING..." when not yet valid
+  Blynk.virtualWrite(V9, buf);
+}
+
+// Per-second schedule engine. Gated on a valid clock; arms next-run epochs on the
+// first valid tick, then evaluates due starts.
+void scheduleEvent() {
+  if (!timeMgr.valid()) return;
+
+  time_t now = timeMgr.now();
+  if (!g_time_was_valid) {
+    g_time_was_valid = true;
+    schedMgr.onTimeValid(now);   // compute next-run for both relays now that we know the time
+  }
+  schedMgr.evaluate(now);
+}
+
+// ------------------------------------------------------------------ //
 //  Arduino entry points                                                //
 // ------------------------------------------------------------------ //
 void setup() {
@@ -323,7 +412,11 @@ void setup() {
   relays[1].begin(1);
 
   boot_ms = millis();
-  mainTimer.setInterval(600000L, uptimeEvent);   // every 10 min — uptime needs no finer resolution (Blynk message quota)
+  schedMgr.begin(onScheduleTrigger, nullptr);
+
+  mainTimer.setInterval(600000L, uptimeEvent);    // every 10 min — uptime needs no finer resolution (Blynk message quota)
+  mainTimer.setInterval(300000L, datetimeEvent);  // V9 device datetime every 5 min
+  mainTimer.setInterval(1000L,   scheduleEvent);  // schedule engine — 1 Hz, sends nothing unless it fires a relay
 
   // Edgent handles WiFi provisioning, auth token storage, OTA, and
   // the factory-reset button (GPIO0 held 5 s).

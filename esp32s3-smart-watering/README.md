@@ -25,9 +25,11 @@ auth token are provisioned at runtime via the Blynk app (no hardcoded secrets).
 | V6  | Time On 1      | display (int)   | seconds elapsed, read-only             |
 | V7  | Run Max 1      | toggle          | run to `MAX_RUNNING_TIME_S` (300 s)    |
 | V8  | Uptime         | **String**      | `2d 03h 14m` format, read-only         |
+| V9  | Device time    | **String**      | `YYYY-MM-DD HH:MM:SS +07` local, read-only, every 5 min |
+| V10 | Schedule       | **String**      | start-time config (see Scheduling), app→device |
 
-> **V8 must be a String datastream** in the Blynk console (not Integer), or the
-> formatted uptime text is dropped.
+> **V8, V9, and V10 must be String datastreams** in the Blynk console (not Integer),
+> or the text is dropped.
 
 ## Hardware pin choices (why GPIO38 / GPIO39)
 
@@ -54,6 +56,61 @@ The pin is **never** HIGH longer than `MAX_RUNNING_TIME_S` (300 s). Three layers
 2. Software backstop in `run()` — catches a missed timer.
 3. Hardware `esp_timer` failsafe (priority-22 task) — forces the pin LOW even if
    `loop()` is blocked during a WiFi/Blynk reconnect.
+
+## Scheduling (timed automatic watering)
+
+The device keeps real wall-clock time via **NTP** (`configTzTime`, resynced hourly)
+and can start a relay at configured local times. Timezone is compiled in — **Vietnam,
+UTC+7, no DST** (`SCHED_TZ "<+07>-7"` in the `.ino`; the POSIX sign is inverted on
+purpose).
+
+- **V9** shows the device's current local time, so you can confirm it isn't drifting.
+  It reads `SYNCING...` until the first NTP sync succeeds.
+- **V10** holds the schedule config string, editable from the Blynk web/iOS app.
+
+### Config string format (V10)
+
+```
+<relay0_sched>|<relay1_sched>           (at most one '|')
+```
+
+- No `|` → relay 0 only.  Leading `|` → relay 1 only.  **Empty string → no schedule.**
+- Each relay: `<day>[,<day>]*;<time>[,<time>]*`
+  - **day:** `Mon Tue Wed Thu Fri Sat Sun` (case-insensitive) or `*` = every day.
+  - **time:** `HH:MM:SS` or `HH:MM` (seconds default `0`). Range-checked.
+
+Examples:
+
+| V10 string | Effect |
+|------------|--------|
+| `Mon,Tue,Wed,Fri;10:30:00,16:30:30` | relay 0 fires those 2 times on those 4 days |
+| `*;06:00`                           | relay 0 every day at 06:00:00 |
+| `*;06:00\|*;06:05`                  | relay 0 at 06:00, relay 1 at 06:05 |
+| `\|Sat,Sun;07:30`                   | relay 1 only, weekends at 07:30 |
+| *(empty)*                           | no scheduled watering |
+
+A scheduled start uses that relay's **Running Time slider (V1/V5)** for duration and
+is bounded by the same 300 s ceiling + 3-layer failsafe as a manual start. A start is
+**skipped if the relay is already running**.
+
+### Invalid input
+
+Each side of the `|` is validated **independently**. A malformed side disables *only
+that relay* and its text is rewritten to `INVALID FORMAT`, leaving the good side
+running. E.g. `*;06:00|Tue;99:99` becomes `*;06:00|INVALID FORMAT`.
+
+### Offline / power behavior
+
+- Schedules **survive a Blynk/internet outage**: the clock keeps ticking from the
+  last NTP sync, so watering continues on time.
+- Schedules **do not survive a power loss without internet on reboot** — the S3 has
+  no battery-backed RTC, so on cold boot it can't know the time until NTP syncs.
+  Until the clock is valid, nothing fires (V9 shows `SYNCING...`). With reliable
+  power+internet this window is only a few seconds at boot. (Add a DS3231 RTC if you
+  ever need true cold-boot-offline scheduling.)
+- A start more than **10 min late** (`MAX_LATENESS_S`, e.g. `loop()` blocked through a
+  long reconnect) is treated as missed and skipped — it won't fire at a surprising
+  time. The schedule is restored after reboot via `syncVirtual(V10)`.
 
 ## Arduino IDE settings (ESP32-S3 N16R8)
 
@@ -174,7 +231,9 @@ connected device costs nothing on its own.
 | Source                          | Trigger                          | Cost                       |
 |---------------------------------|----------------------------------|----------------------------|
 | **Uptime (V8)**                 | every 10 min, always on          | **144 / day**              |
+| **Device time (V9)**            | every 5 min, always on           | **288 / day**              |
 | **Time On (V2/V6)**             | every 1 s *while a relay runs*   | ≈ run-seconds, ≤300/run    |
+| Scheduled start                 | each scheduled relay fire        | 1 msg (V0/V4 → 1)          |
 | Shutdown resets (switch/run_max/time_on) | each relay stop         | 1–3 msgs                   |
 | Conflict-reject writes          | conflicting command sent         | 1 msg (rare)               |
 | Reconnect `syncVirtual(V0–V7)`  | each Blynk reconnect             | ~8–16 msgs                 |
@@ -189,11 +248,12 @@ connected device costs nothing on its own.
 | Component                                   | Est. msgs/day | /month  |
 |---------------------------------------------|---------------|---------|
 | Uptime baseline (10 min, always on)         | 144           | ~4,300  |
+| Device time (5 min, always on)              | 288           | ~8,600  |
 | Watering (e.g. 6 runs/day × ~120 s)         | ~750          | ~22,500 |
 | App interaction (checking, taps)            | ~150          | ~4,500  |
 | Reconnect syncs (stable WiFi)               | ~100          | ~3,000  |
-| **Typical total**                           | **~1,150/day** | **~35k** |
-| Conservative budget (with headroom)         | ~1,500/day    | ~45k    |
+| **Typical total**                           | **~1,440/day** | **~43k** |
+| Conservative budget (with headroom)         | ~1,800/day    | ~54k    |
 
 The dominant cost is **watering runtime** (`time_on` at 1 msg/s during runs), not
 uptime. If you ever approach the cap with many devices, throttle `time_on` to every
