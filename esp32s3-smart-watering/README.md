@@ -27,9 +27,13 @@ auth token are provisioned at runtime via the Blynk app (no hardcoded secrets).
 | V8  | Uptime         | **String**      | `2d 03h 14m` format, read-only         |
 | V9  | Device time    | **String**      | `YYYY-MM-DD HH:MM:SS +07` local, read-only, every 5 min |
 | V10 | Schedule       | **String**      | start-time config (see Scheduling), app→device |
+| V11 | Moisture cfg   | **String**      | sensor + MQTT config (see Soil-moisture), app→device |
 
-> **V8, V9, and V10 must be String datastreams** in the Blynk console (not Integer),
-> or the text is dropped.
+> **V8, V9, V10, and V11 must be String datastreams** in the Blynk console (not
+> Integer), or the text is dropped.
+
+> The `.ino` defines readable `#define VPIN_*` aliases for every pin above (e.g.
+> `VPIN_MOISTURE_CFG` → V11); the table here is the canonical reference.
 
 ## Hardware pin choices (why GPIO38 / GPIO39)
 
@@ -43,11 +47,16 @@ attach a hardware debugger — irrelevant in production.)
 The **BOOT button is GPIO0** (active-low) and the onboard **WS2812 RGB LED is
 GPIO48** — neither collides with the relays.
 
-## Required library
+## Required libraries
 
-The status LED is an addressable WS2812, so `Indicator.h` pulls in
-**Adafruit NeoPixel**. Install it once via **Tools → Manage Libraries → "Adafruit
-NeoPixel"**, or it won't compile.
+Install both via **Tools → Manage Libraries** (or `arduino-cli lib install`, below):
+
+- **Adafruit NeoPixel** — the status LED is an addressable WS2812, so `Indicator.h`
+  pulls it in.
+- **PubSubClient** (Nick O'Leary) — MQTT client used by `MqttPublisher.h` for the
+  soil-moisture push.
+
+Without either, the sketch won't compile.
 
 ## Safety design
 
@@ -112,6 +121,66 @@ running. E.g. `*;06:00|Tue;99:99` becomes `*;06:00|INVALID FORMAT`.
   long reconnect) is treated as missed and skipped — it won't fire at a surprising
   time. The schedule is restored after reboot via `syncVirtual(V10)`.
 
+## Soil-moisture monitoring (MQTT → Prometheus)
+
+Up to **3 analog soil sensors** on **ADC1 (GPIO4 / GPIO5 / GPIO6)** are sampled and
+pushed over **MQTT** to a local broker every *interval* seconds, where a
+`mqtt2prometheus` exporter turns them into Prometheus metrics for Grafana. The broker
++ exporter run on a Raspberry Pi via Docker — see the repo's
+[`monitoring/`](../monitoring/) stack. Firmware side: `Moisture.h` (config parsing +
+ADC sampling) and `MqttPublisher.h` (PubSubClient wrapper).
+
+- Readings are **raw 12-bit ADC** (0–4095); raw→% calibration is done downstream
+  (Grafana / Prometheus rules) so re-calibrating never means re-flashing.
+- Publishing goes to **your own broker, not Blynk** — it costs **zero** Blynk messages.
+- **ADC1 is required** (ADC2 is unusable while WiFi is on). GPIO4/5/6 sit on the
+  camera/ADC header — free here because this build doesn't wire the camera
+  (see `ESP32S3.md` §10).
+- ⚠️ **Only list as many pins as you physically wire.** An unconnected ADC pin floats
+  and publishes drifting noise, **not** `0`.
+
+### Config string format (V11)
+
+```
+<pin1>[,<pin2>[,<pin3>]] ; <device_name> ; <mqtt_host>[:<port>] ; <interval_s>
+```
+
+- **pins:** 1–3 comma-separated labels. The *count* selects how many channels are
+  sampled (positional: name 1 → GPIO4/`s0`, 2 → GPIO5/`s1`, 3 → GPIO6/`s2`). The names
+  are for humans only — the wire format is `s0/s1/s2` by channel, and friendly names
+  are mapped in **Grafana** (the one dynamic MQTT/Prometheus label is spent on the
+  device name).
+- **device_name:** charset `[A-Za-z0-9_-]`; becomes the MQTT topic segment + the
+  Prometheus `sensor` label.
+- **mqtt_host[:port]:** broker IP/hostname; port optional (default **1883**).
+- **interval_s:** publish period in seconds, optional (default **60**, clamped **10–3600**).
+
+Examples:
+
+| V11 string | Effect |
+|------------|--------|
+| `tomato,basil,mint;garden-node1;192.168.1.50:1883;60` | 3 sensors → `watering/garden-node1/moisture` every 60 s |
+| `tomato;balcony;mqtt.local` | 1 sensor, default port (1883) + interval (60 s) |
+| *(empty / malformed)* | rejected → `INVALID FORMAT`, sampling stops |
+
+Publishes e.g. `{"s0":2731,"s1":2540,"s2":2600}`. A retained Last-Will on
+`watering/<device>/status` (`online`/`offline`) is registered for the future
+command/Grafana-annotation path.
+
+### Invalid input
+
+A malformed string is rejected wholesale, its text rewritten to `INVALID FORMAT`, and
+sampling stops until a valid string is set (same pattern as V10).
+
+### Broker offline behavior
+
+If the broker is unreachable, each publish attempt is **capped at ~2 s**
+(`MqttPublisher::begin()` sets a 2 s TCP-connect timeout + 2 s MQTT CONNACK timeout)
+and retried on the next interval — it recovers automatically when the broker returns.
+PubSubClient does not reconnect on its own; the per-interval attempt is what heals it.
+The brief stall never affects pump safety: the hardware `esp_timer` failsafe runs on
+its own task, independent of `loop()`.
+
 ## Arduino IDE settings (ESP32-S3 N16R8)
 
 Select board **"ESP32S3 Dev Module"**, then in **Tools**:
@@ -141,6 +210,42 @@ Select board **"ESP32S3 Dev Module"**, then in **Tools**:
 > native USB; if uploads fail, hold **BOOT**, tap **RST**, release **BOOT** to
 > force download mode, flash once, then it behaves normally.
 
+## Build & upload from the command line (arduino-cli)
+
+Same toolchain as the IDE, scripted. Verified with **arduino-cli 1.5.x** and the
+**esp32:esp32 3.3.x** core. One-time setup:
+
+```bash
+arduino-cli core update-index
+arduino-cli core install esp32:esp32
+arduino-cli lib install "Adafruit NeoPixel" "PubSubClient" "Blynk"
+```
+
+The FQBN options below mirror the **Tools** menu in the IDE table above (notably the
+OTA-capable `app3M_fat9M_16MB` partition scheme and `PSRAM=disabled`). Stash it in a
+variable to keep commands readable:
+
+```bash
+FQBN="esp32:esp32:esp32s3:USBMode=hwcdc,CDCOnBoot=cdc,MSCOnBoot=default,DFUOnBoot=default,UploadMode=default,CPUFreq=240,FlashMode=qio,FlashSize=16M,PartitionScheme=app3M_fat9M_16MB,DebugLevel=none,PSRAM=disabled,LoopCore=1,EventsCore=1,UploadSpeed=921600"
+
+# compile only
+arduino-cli compile --fqbn "$FQBN" esp32s3-smart-watering
+
+# compile AND write artifacts into build/ (produces the .bin used for OTA, below)
+arduino-cli compile --fqbn "$FQBN" --export-binaries esp32s3-smart-watering
+
+# find the port, then flash over USB
+arduino-cli board list
+arduino-cli upload --fqbn "$FQBN" -p /dev/ttyACM0 esp32s3-smart-watering
+```
+
+`--export-binaries` writes `esp32s3-smart-watering.ino.bin` into
+`esp32s3-smart-watering/build/esp32.esp32.esp32s3/` — exactly the file the OTA section
+ships. Without the flag, arduino-cli compiles in a temp dir and keeps nothing.
+
+> **Upload trouble?** If the port doesn't appear or upload won't start, hold **BOOT**,
+> tap **RST**, release **BOOT**, then re-run the upload once (see the USB note above).
+
 ## OTA firmware update (no factory reset needed)
 
 OTA updates the **app partition only**. Your WiFi credentials and Blynk auth token
@@ -166,7 +271,8 @@ flash** with an OTA scheme. Every subsequent update can then go over the air.
 
 ### Step 3 — Export the compiled binary
 
-1. **Sketch → Export Compiled Binary** (compiles and writes the `.bin`).
+1. **Sketch → Export Compiled Binary** (compiles and writes the `.bin`) — or from the
+   CLI, `arduino-cli compile --fqbn "$FQBN" --export-binaries esp32s3-smart-watering`.
 2. **Sketch → Show Sketch Folder** → open
    `build/esp32.esp32.esp32s3/`.
 3. Grab the **plain application binary** — this is the only file OTA wants:
@@ -236,7 +342,7 @@ connected device costs nothing on its own.
 | Scheduled start                 | each scheduled relay fire        | 1 msg (V0/V4 → 1)          |
 | Shutdown resets (switch/run_max/time_on) | each relay stop         | 1–3 msgs                   |
 | Conflict-reject writes          | conflicting command sent         | 1 msg (rare)               |
-| Reconnect `syncVirtual(V0–V7)`  | each Blynk reconnect             | ~8–16 msgs                 |
+| Reconnect `syncVirtual` (V0–V7, V10, V11) | each Blynk reconnect   | ~10 msgs                   |
 | Inbound app commands            | each button/slider from phone    | 1 msg each                 |
 
 > ⚠️ **The uptime timer was the budget-killer.** At a 1 s interval it would send

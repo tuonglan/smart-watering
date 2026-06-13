@@ -192,6 +192,7 @@ in `Settings.h` and the relay GPIO array in the `.ino` differ.
 7. CPU Frequency:    240 MHz             ← 160 MHz also fine
 8. Upload Speed:     921600
 9. Install library:  Adafruit NeoPixel  (for the GPIO48 WS2812)
+10. Install library: PubSubClient       (Nick O'Leary — MQTT moisture push, §10)
 ```
 
 **Wrong-board tell:** if the **CPU Frequency dropdown maxes at 160 MHz** or there is
@@ -202,3 +203,51 @@ in `Settings.h` and the relay GPIO array in the `.ino` differ.
 If `Serial.print()` is silent, the cause is almost always **USB CDC On Boot:
 Disabled** or a charge-only cable. If upload won't start: **hold BOOT, tap RST,
 release BOOT**, then upload once.
+
+---
+
+## 10. Soil-moisture monitoring (V11 + MQTT)
+
+Up to **3 analog moisture sensors** are sampled on **ADC1** and pushed over MQTT to a
+local broker (Raspberry Pi), where a `mqtt2prometheus` exporter turns them into
+Prometheus metrics. The broker + exporter stack lives in the repo's `monitoring/`
+directory; the firmware side is `Moisture.h` + `MqttPublisher.h`.
+
+**Sensor pins** (positional — channel `sN` → fixed GPIO):
+
+| Channel | GPIO  | ADC      | Header                                   |
+|---------|-------|----------|------------------------------------------|
+| s0      | GPIO4 | ADC1_CH3 | left-hand (camera/ADC) header            |
+| s1      | GPIO5 | ADC1_CH4 | left-hand (camera/ADC) header            |
+| s2      | GPIO6 | ADC1_CH5 | left-hand (camera/ADC) header            |
+
+> **Why ADC1:** ADC2 is unusable while WiFi is active, and this node is always on
+> WiFi. GPIO4/5/6 sit on the camera/ADC header (§2) — free here because this build
+> does not wire the camera. Keep the camera unconnected if you use these pins.
+
+**V11 config string** (set from the Blynk app; restored on every connect):
+
+```
+<pin1>[,<pin2>[,<pin3>]] ; <device_name> ; <mqtt_host>[:<port>] ; <interval_s>
+```
+
+- pin names: 1–3 labels; the **count** picks how many channels are sampled. The names
+  are for humans only — the wire format is `s0/s1/s2` by channel, and friendly names
+  are mapped in Grafana (one dynamic MQTT/Prom label is spent on the device name).
+- `device_name`: charset `[A-Za-z0-9_-]`; becomes the topic segment + Prom `sensor` label.
+- `mqtt_host[:port]`: broker IP/host, port optional (default **1883**).
+- `interval_s`: publish period, optional (default **60**, clamped 10–3600).
+- A malformed string is rejected and echoed back as **`INVALID FORMAT`** (sampling stops).
+
+```
+example:  tomato,basil,mint;garden-node1;192.168.1.50:1883;60
+publishes: topic  watering/garden-node1/moisture
+           payload {"s0":2731,"s1":2540,"s2":2600}   every 60 s
+```
+
+A retained **Last Will** is registered on `watering/<device>/status` (`online`/`offline`)
+for future use; today liveness is handled by the exporter's `cache.timeout`.
+
+> **Raw values only.** The device publishes raw 12-bit ADC (0–4095); raw→% calibration
+> is done downstream (Grafana / Prometheus rules) so re-calibrating never means
+> re-flashing.
