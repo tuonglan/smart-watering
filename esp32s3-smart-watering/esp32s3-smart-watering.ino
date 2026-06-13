@@ -25,6 +25,9 @@
 //       guide is printed once on the first connection after boot. See Terminal.h.
 //   V42 Terminal mode    (Switch, app→device — 1 = re-run the entered command at 1 Hz
 //       until cleared / flipped off / 5-min auto-stop; 0 = run once per entry).
+//   V43 Re-run button    (Switch, app↔device — re-runs the last command. Once mode:
+//       runs once then auto-releases to 0. Continuous mode: (re)starts the live tail,
+//       stays 1 until tapped again or the 5-min guard fires. NOT synced on reconnect.)
 //
 // Relay index = vpin / 4 , pin offset = vpin % 4
 //
@@ -96,6 +99,7 @@
 #define VPIN_LOG_LEVEL       V40
 #define VPIN_TERMINAL        V41   // WidgetTerminal: debug command in/out (see Terminal.h)
 #define VPIN_TERM_MODE       V42   // Switch: 1 = run command @1Hz, 0 = run once
+#define VPIN_TERM_RERUN      V43   // Switch: re-run the last command (see Terminal.h)
 
 // ------------------------------------------------------------------ //
 //  Hardware pin for each relay                                         //
@@ -438,6 +442,7 @@ BLYNK_CONNECTED() {
   // reconnect — so a WiFi blip doesn't spam the terminal.
   if (!g_termHelpShown) {
     dbgTerm.printHelp();
+    Blynk.virtualWrite(VPIN_TERM_RERUN, 0);   // start with the re-run button released (clear any stale state)
     g_termHelpShown = true;
   }
 }
@@ -464,6 +469,14 @@ BLYNK_WRITE(VPIN_TERMINAL) {
 BLYNK_WRITE(VPIN_TERM_MODE) {
   g_termContinuous = (param.asInt() != 0);
   LOG_INFO(String("terminal mode -> ") + (g_termContinuous ? "continuous" : "once"));
+}
+
+// Re-run button (V43): tap to re-run the last command. In once mode it runs a single
+// time and the button auto-releases (V43->0); in continuous mode it (re)starts the live
+// tail and stays engaged until tapped again (->0) or the 5-min guard fires.
+BLYNK_WRITE(VPIN_TERM_RERUN) {
+  if (param.asInt() != 0) dbgTerm.rerun(g_termContinuous);
+  else                    dbgTerm.stopRerun();
 }
 
 // Schedule config from the app. Parse, (re)arm, and echo "INVALID FORMAT" back for

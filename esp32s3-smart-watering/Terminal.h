@@ -29,6 +29,9 @@
 #ifndef VPIN_TERMINAL
 #define VPIN_TERMINAL  V41
 #endif
+#ifndef VPIN_TERM_RERUN
+#define VPIN_TERM_RERUN  V43   // Switch: re-run the last command (see TerminalManager)
+#endif
 
 // The brief command guide — single source of truth shared by the boot-time print
 // (TerminalManager::printHelp) and the "help" command. Prints lines only; the caller
@@ -36,6 +39,7 @@
 static void termPrintGuide(WidgetTerminal &term) {
   term.println("=== debug terminal (V41) ===");
   term.println("V42=1: run @1Hz, auto-stop 5m | V42=0: run once");
+  term.println("V43: re-run last command");
   term.println(" ping <ip|host>   ICMP echo, RTT in ms");
   term.println(" get_moisture     raw ADC s0/s1/s2 (GPIO4/5/6)");
   term.println(" help             show this guide");
@@ -98,7 +102,7 @@ public:
 
 class TerminalManager {
 public:
-  TerminalManager() : _term(VPIN_TERMINAL), _active(nullptr), _lastChangeMs(0) {
+  TerminalManager() : _term(VPIN_TERMINAL), _active(nullptr), _lastCmd(nullptr), _lastChangeMs(0) {
     _table[0] = &_ping;
     _table[1] = &_moist;
     _table[2] = &_help;
@@ -113,8 +117,12 @@ public:
     _copyTrim(buf, line, sizeof(buf));
 
     if (buf[0] == '\0') {            // empty line = stop, no further output
-      if (_active) LOG_INFO("terminal: cleared by empty input — stopped");
-      else         DEBUG_PRINT("terminal: empty input (nothing running)");
+      if (_active) {
+        LOG_INFO("terminal: cleared by empty input — stopped");
+        Blynk.virtualWrite(VPIN_TERM_RERUN, 0);   // release the re-run button too
+      } else {
+        DEBUG_PRINT("terminal: empty input (nothing running)");
+      }
       _active = nullptr;
       return;
     }
@@ -139,6 +147,7 @@ public:
     strncpy(_args, args, sizeof(_args) - 1);
     _args[sizeof(_args) - 1] = '\0';
     _lastChangeMs = millis();
+    _lastCmd      = cmd;             // remember it for the V43 re-run button
 
     LOG_INFO(String("terminal: run '") + buf + (_args[0] ? String(" ") + _args : String("")) +
              "' (" + (continuous ? "continuous @1Hz" : "once") + ")");
@@ -159,6 +168,7 @@ public:
       _term.flush();
       LOG_INFO("terminal: live tail stopped (V42 off)");
       _active = nullptr;
+      Blynk.virtualWrite(VPIN_TERM_RERUN, 0);       // release the re-run button too
       return;
     }
 
@@ -168,11 +178,51 @@ public:
       LOG_WARN("terminal: auto-stopped after 5 min (quota guard)");
       _active = nullptr;
       Blynk.virtualWrite(VPIN_TERMINAL, "");        // clear the command on Blynk too
+      Blynk.virtualWrite(VPIN_TERM_RERUN, 0);       // release the re-run button too
       return;
     }
 
     _active->run(_args, _term);
     _term.flush();
+  }
+
+  // V43 pressed (->1): re-run the last entered command (see _lastCmd). `continuous` is
+  // the current V42 mode. Once: run a single time, then release the button (V43->0).
+  // Continuous: (re)start the live tail, button stays 1 until pressed again (->0) or the
+  // 5-min guard fires. No-op (with a note) if nothing has been run yet this boot.
+  void rerun(bool continuous) {
+    if (!_lastCmd) {
+      _term.println("no command to re-run yet");
+      _term.flush();
+      LOG_WARN("terminal: re-run with no previous command");
+      Blynk.virtualWrite(VPIN_TERM_RERUN, 0);       // nothing to keep the button on for
+      return;
+    }
+
+    _lastChangeMs = millis();                       // restart the 5-min window
+    LOG_INFO(String("terminal: re-run '") + _lastCmd->name() +
+             (_args[0] ? String(" ") + _args : String("")) +
+             "' (" + (continuous ? "continuous @1Hz" : "once") + ")");
+
+    _lastCmd->run(_args, _term);
+    _term.flush();
+
+    if (continuous) {
+      _active = _lastCmd;                           // keep tailing; V43 stays 1
+    } else {
+      _active = nullptr;
+      Blynk.virtualWrite(VPIN_TERM_RERUN, 0);       // once: auto-release the button
+    }
+  }
+
+  // V43 released (->0): stop a running re-run / live tail (the "tap again" stop).
+  void stopRerun() {
+    if (_active) {
+      _term.println("[stopped]");
+      _term.flush();
+      LOG_INFO("terminal: re-run stopped (V43 off)");
+      _active = nullptr;
+    }
   }
 
   // Brief command guide. Printed once, on the first connection after boot.
@@ -191,7 +241,8 @@ private:
   HelpCommand        _help;
   TermCommand       *_table[3];     // command registry
   TermCommand       *_active;       // cached parsed command (nullptr = idle)
-  char               _args[CMD_MAX];// cached args for _active
+  TermCommand       *_lastCmd;      // last valid command entered, for the V43 re-run button
+  char               _args[CMD_MAX];// cached args for _active / _lastCmd
   uint32_t           _lastChangeMs; // when _active was last (re)entered, for the guard
 
   TermCommand *_find(const char *name) {

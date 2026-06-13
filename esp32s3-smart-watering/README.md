@@ -31,10 +31,12 @@ auth token are provisioned at runtime via the Blynk app (no hardcoded secrets).
 | V40 | Log level      | Integer 0–4     | serial verbosity (see Logging), app→device |
 | V41 | Debug terminal | **Terminal**    | type debug commands, output on same widget (see Debug terminal), app↔device |
 | V42 | Terminal mode  | Switch 0/1      | 1 = run command @1 Hz, 0 = run once (see Debug terminal), app→device |
+| V43 | Re-run         | Switch 0/1      | re-run the last command (see Debug terminal), app↔device |
 
 > **V8, V9, V10, and V11 must be String datastreams** in the Blynk console (not
-> Integer), or the text is dropped. **V40 and V42 are Integer** datastreams (V40 range
-> 0–4, V42 a 0/1 switch). **V41 is a Terminal** widget bound to a String datastream.
+> Integer), or the text is dropped. **V40, V42, and V43 are Integer** datastreams (V40
+> range 0–4; V42/V43 are 0/1 switches). **V41 is a Terminal** widget bound to a String
+> datastream.
 
 > The `.ino` defines readable `#define VPIN_*` aliases for every pin above (e.g.
 > `VPIN_MOISTURE_CFG` → V11); the table here is the canonical reference.
@@ -199,7 +201,7 @@ PubSubClient does not reconnect on its own; the per-interval attempt is what hea
 The brief stall never affects pump safety: the hardware `esp_timer` failsafe runs on
 its own task, independent of `loop()`.
 
-## Debug terminal (V41 / V42)
+## Debug terminal (V41 / V42 / V43)
 
 A **Terminal** widget on **V41** lets you type ad-hoc debug commands and read their
 output **on the same widget** — a WidgetTerminal uses one virtual pin for both
@@ -215,9 +217,20 @@ run mode:
   fires. The auto-stop also clears V41 on Blynk, so a command left running by accident
   can't quietly drain your message quota (see Blynk message budget).
 
+A **Switch** on **V43** is a **re-run** button for the **last command** — handy because
+the Terminal's input box clears on send and can't be refilled:
+
+- **Once mode (V42 = 0):** tap → runs the last command a single time, then the button
+  auto-releases (firmware writes V43 → 0).
+- **Continuous mode (V42 = 1):** tap → (re)starts the live tail and the button stays on;
+  tap again (→ 0) to stop, or let the 5-minute guard stop it. Any stop releases V43.
+- Re-run uses the last *valid* command — an unknown or empty line never overwrites it.
+  If nothing has run yet this boot, it prints `no command to re-run yet`.
+
 On the **first connection after boot** (not on reconnects) a brief command guide is
-printed to the terminal. V41 is deliberately **not** restored on reconnect, so a stale
-command never auto-resumes after a reboot.
+printed to the terminal. V41 and V43 are deliberately **not** restored on reconnect, so
+a stale command never auto-resumes after a reboot (V43 is also reset to 0 on first
+connect).
 
 ### Commands
 
@@ -328,6 +341,9 @@ terminal widget, so it isn't duplicated to the serial log):
 |-------|-------|--------------|
 | Command accepted | INFO | `terminal: run 'ping 8.8.8.8' (continuous @1Hz)` |
 | Run mode changed (V42) | INFO | `terminal mode -> continuous` |
+| Re-run last command (V43) | INFO | `terminal: re-run 'get_moisture' (once)` |
+| Re-run with nothing to repeat | WARN | `terminal: re-run with no previous command` |
+| Re-run stopped (V43 off) | INFO | `terminal: re-run stopped (V43 off)` |
 | Unknown command | WARN | `terminal: unknown command 'foo'` |
 | Cleared by empty input | INFO | `terminal: cleared by empty input — stopped` |
 | Live tail stopped (V42 off) | INFO | `terminal: live tail stopped (V42 off)` |
