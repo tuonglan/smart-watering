@@ -132,6 +132,9 @@ ADC sampling) and `MqttPublisher.h` (PubSubClient wrapper).
 
 - Readings are **raw 12-bit ADC** (0–4095); raw→% calibration is done downstream
   (Grafana / Prometheus rules) so re-calibrating never means re-flashing.
+- **Both relay states** (`r0`/`r1`, 1=on) ride in the same message → a `relay_on`
+  gauge in Prometheus. They're published every interval **and** immediately on any
+  relay change, so a short pump run (default 10 s) isn't missed by the periodic grid.
 - Publishing goes to **your own broker, not Blynk** — it costs **zero** Blynk messages.
 - **ADC1 is required** (ADC2 is unusable while WiFi is on). GPIO4/5/6 sit on the
   camera/ADC header — free here because this build doesn't wire the camera
@@ -163,7 +166,7 @@ Examples:
 | `tomato;balcony;mqtt.local` | 1 sensor, default port (1883) + interval (60 s) |
 | *(empty / malformed)* | rejected → `INVALID FORMAT`, sampling stops |
 
-Publishes e.g. `{"s0":2731,"s1":2540,"s2":2600}`. A retained Last-Will on
+Publishes e.g. `{"s0":2731,"s1":2540,"s2":2600,"r0":0,"r1":1}`. A retained Last-Will on
 `watering/<device>/status` (`online`/`offline`) is registered for the future
 command/Grafana-annotation path.
 

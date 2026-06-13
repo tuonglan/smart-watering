@@ -5,7 +5,8 @@
 //
 // Wire contract (matches monitoring/mqtt2prometheus/config.yaml):
 //     topic:   watering/<device>/moisture
-//     payload: {"s0":<raw>,"s1":<raw>,"s2":<raw>}   (only the configured channels)
+//     payload: {"s0":<raw>,..,"r0":<0|1>,"r1":<0|1>}   (sN = configured channels,
+//              rN = relay/pump state — always both relays)
 //     status:  watering/<device>/status  -> "online"/"offline" (retained, via LWT)
 //
 // The status topic is published for free via the MQTT Last Will & Testament: if this
@@ -52,18 +53,26 @@ public:
   // Service the MQTT keepalive/incoming. Call from loop().
   void loop() { if (_configured) _mqtt.loop(); }
 
-  // Build {"s0":..,...} for `count` channels and publish once. Connects on demand.
-  // Returns true only if the broker accepted the publish.
-  bool publish(const int *vals, uint8_t count) {
+  // Build {"s0":..,"r0":..,..} and publish once. `vals`/`count` are the moisture
+  // channels; `relayOn`/`relayCount` the relay states (published as 1/0). Connects on
+  // demand. Returns true only if the broker accepted the publish.
+  bool publish(const int *vals, uint8_t count, const bool *relayOn, uint8_t relayCount) {
     if (!_configured || WiFi.status() != WL_CONNECTED) return false;
     if (!_ensureConnected()) return false;
 
-    char payload[96];
+    char payload[128];
     int  n = 0;
+    bool first = true;
     n += snprintf(payload + n, sizeof(payload) - n, "{");
     for (uint8_t i = 0; i < count; i++) {
       n += snprintf(payload + n, sizeof(payload) - n,
-                    "%s\"s%u\":%d", (i ? "," : ""), (unsigned)i, vals[i]);
+                    "%s\"s%u\":%d", (first ? "" : ","), (unsigned)i, vals[i]);
+      first = false;
+    }
+    for (uint8_t i = 0; i < relayCount; i++) {
+      n += snprintf(payload + n, sizeof(payload) - n,
+                    "%s\"r%u\":%d", (first ? "" : ","), (unsigned)i, relayOn[i] ? 1 : 0);
+      first = false;
     }
     snprintf(payload + n, sizeof(payload) - n, "}");
 

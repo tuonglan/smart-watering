@@ -31,10 +31,12 @@
 //
 // Moisture monitoring (V11): up to 3 analog soil sensors on ADC1 (GPIO4/5/6) are
 // sampled and pushed over MQTT to a local broker every <interval> s, where a
-// mqtt2prometheus exporter turns them into Prometheus metrics. See Moisture.h for
-// the V11 string format and monitoring/ for the broker + exporter stack.
+// mqtt2prometheus exporter turns them into Prometheus metrics. The same message also
+// carries both relay/pump states (r0/r1, 1=on); a relay change is published within
+// ~1 s so short runs are not missed. See Moisture.h for the V11 string format and
+// monitoring/ for the broker + exporter stack.
 
-#define BLYNK_FIRMWARE_VERSION  "1.2.0"
+#define BLYNK_FIRMWARE_VERSION  "1.3.0"
 #define BLYNK_PRINT             Serial
 #define APP_DEBUG
 
@@ -350,6 +352,7 @@ bool            g_time_was_valid = false;   // rising-edge latch for first NTP s
 MoistureConfig  moistCfg;                   // V11 config (pins, device, broker, interval)
 MqttPublisher   mqttPub;                     // pushes readings to the local broker
 uint32_t        last_publish_ms = 0;         // 0 = publish on the next tick
+bool            last_relay_state[2] = { false, false };  // edge-detect for out-of-cadence publishes
 
 // Scheduler asks us to start a relay; we honour the "skip if already running" rule.
 static void onScheduleTrigger(uint8_t relay_idx, void * /*ctx*/) {
@@ -451,21 +454,31 @@ void scheduleEvent() {
   schedMgr.evaluate(now);
 }
 
-// Moisture publish tick (1 Hz). Self-paces to V11's interval via last_publish_ms, so
-// changing the interval needs no timer juggling. Samples each configured channel and
-// pushes one MQTT message; a failed publish just retries next interval.
+// Moisture + relay publish tick (1 Hz). Self-paces to V11's interval via
+// last_publish_ms, so changing the interval needs no timer juggling. Also publishes
+// out of cadence whenever a relay changes state, so a short pump run (default 10 s)
+// is not missed by the periodic grid. Samples each configured channel, tacks on both
+// relay states, and pushes one MQTT message; a failed publish just retries next tick.
 void moistureEvent() {
   if (!moistCfg.valid()) return;
 
+  bool relayOn[2] = { relays[0].isOn(), relays[1].isOn() };
+  bool relayChanged = (relayOn[0] != last_relay_state[0]) ||
+                      (relayOn[1] != last_relay_state[1]);
+
   uint32_t now = millis();
-  if (last_publish_ms != 0 && (now - last_publish_ms) < moistCfg.intervalMs()) return;
-  last_publish_ms = now;
+  bool due = (last_publish_ms == 0) || ((now - last_publish_ms) >= moistCfg.intervalMs());
+  if (!due && !relayChanged) return;
+
+  last_publish_ms     = now;
+  last_relay_state[0] = relayOn[0];
+  last_relay_state[1] = relayOn[1];
 
   int vals[MOIST_MAX_PINS];
   uint8_t c = moistCfg.count();
   for (uint8_t i = 0; i < c; i++) vals[i] = moistCfg.readChannel(i);
 
-  bool ok = mqttPub.publish(vals, c);
+  bool ok = mqttPub.publish(vals, c, relayOn, 2);
   DEBUG_PRINT(ok ? "moisture: published" : "moisture: publish failed");
 }
 

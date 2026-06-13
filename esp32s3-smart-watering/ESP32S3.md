@@ -242,8 +242,13 @@ directory; the firmware side is `Moisture.h` + `MqttPublisher.h`.
 ```
 example:  tomato,basil,mint;garden-node1;192.168.1.50:1883;60
 publishes: topic  watering/garden-node1/moisture
-           payload {"s0":2731,"s1":2540,"s2":2600}   every 60 s
+           payload {"s0":2731,"s1":2540,"s2":2600,"r0":0,"r1":1}   every 60 s
 ```
+
+**Relay state** rides in the same message: `r0` (GPIO38) and `r1` (GPIO39), `1`=on
+`0`=off, mapped to a `relay_on` gauge. Both relays are always included, regardless of
+sensor count, and a relay change is published immediately (within ~1 s of the 1 Hz
+tick) so a short pump run isn't missed between periodic publishes.
 
 A retained **Last Will** is registered on `watering/<device>/status` (`online`/`offline`)
 for future use; today liveness is handled by the exporter's `cache.timeout`.

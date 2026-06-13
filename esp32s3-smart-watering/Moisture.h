@@ -17,7 +17,9 @@
 //                    channels are sampled (names map positionally to GPIO4/5/6).
 //                    The names themselves are NOT published — friendly names are a
 //                    Grafana-side concern; the wire format is s0/s1/s2 by channel.
-//                    They are kept only for logging/diagnostics.
+//                    They are kept only for logging/diagnostics. (Relay states r0/r1
+//                    are added to the published message by the .ino, not configured
+//                    here — they ride along whenever this config is valid.)
 //   - device_name  : becomes the MQTT topic segment + Prometheus `sensor` label.
 //                    charset [A-Za-z0-9_-], so it is always topic-safe.
 //   - mqtt_host    : broker hostname/IP, optional ":port" (default 1883).

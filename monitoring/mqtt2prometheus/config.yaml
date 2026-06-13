@@ -2,8 +2,9 @@
 #
 # Contract with the ESP32-S3:
 #   topic:   watering/<device_name>/moisture
-#   payload: {"s0": <raw>, "s1": <raw>, "s2": <raw>}   (only the configured pins)
-#            raw = 12-bit ADC value, 0..4095
+#   payload: {"s0": <raw>, .., "r0": <0|1>, "r1": <0|1>}
+#            sN  = 12-bit ADC moisture value, 0..4095 (only the configured pins)
+#            rN  = relay/pump state, 1=on 0=off (always both relays)
 #
 # The <device_name> from the topic becomes the `sensor` label (exporter default).
 # Rename it to `device` in the Prometheus scrape config if you like (see README).
@@ -48,3 +49,19 @@ metrics:
     type: gauge
     const_labels:
       channel: "2"
+
+  # Relays are fixed: r0->GPIO38, r1->GPIO39. Published in every moisture message
+  # and immediately on any state change, so short pump runs are captured.
+  - prom_name: relay_on
+    mqtt_name: r0
+    help: "Relay/pump state (1=on, 0=off). relay 0 / GPIO38"
+    type: gauge
+    const_labels:
+      relay: "0"
+
+  - prom_name: relay_on
+    mqtt_name: r1
+    help: "Relay/pump state (1=on, 0=off). relay 1 / GPIO39"
+    type: gauge
+    const_labels:
+      relay: "1"
