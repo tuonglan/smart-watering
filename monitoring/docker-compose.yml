@@ -26,6 +26,28 @@ services:
     networks:
       - watering
 
+  # Browser-based MQTT Explorer: live tree + per-value graphs, no Prometheus needed.
+  # Server-side (Node) build, so it reaches the broker over the compose network at
+  # mosquitto:1883 — the broker needs no websocket listener. Open http://<pi>:4000,
+  # then add a connection once (host: mosquitto, port: 1883); it persists to the volume.
+  mqtt-explorer:
+    image: smeagolworms4/mqtt-explorer:latest
+    container_name: watering-mqtt-explorer
+    restart: unless-stopped
+    depends_on:
+      - mosquitto
+    ports:
+      - "4000:4000"      # web UI
+    environment:
+      HTTP_PORT: "4000"
+      CONFIG_PATH: /mqtt-explorer/config
+      # HTTP_USER: admin           # uncomment to password-protect the UI
+      # HTTP_PASSWORD: changeme
+    volumes:
+      - mqtt-explorer-config:/mqtt-explorer/config
+    networks:
+      - watering
+
 networks:
   watering:
     driver: bridge
@@ -33,3 +55,4 @@ networks:
 volumes:
   mosquitto-data:
   mosquitto-log:
+  mqtt-explorer-config:
