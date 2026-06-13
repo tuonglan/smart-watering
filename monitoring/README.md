@@ -25,15 +25,18 @@ docker compose logs -f
 
 **Topic:** `watering/<device_name>/moisture`
 
-**Payload:** JSON — moisture keys for configured pins, plus both relay states:
+**Payload:** JSON — one key per metric the device's V11 config enables:
 ```json
 { "s0": 2731, "s1": 2540, "s2": 2600, "r0": 0, "r1": 1 }
 ```
 - `s0` → GPIO4, `s1` → GPIO5, `s2` → GPIO6; value = raw 12-bit ADC, `0..4095`
   (no calibration applied on-device — see note)
-- `r0` → GPIO38, `r1` → GPIO39; value = relay/pump state, `1`=on `0`=off (always both)
-- Published every `<interval>` s **and** immediately on any relay change, so a short
-  pump run (default 10 s) is not missed by the periodic grid.
+- `r0` → GPIO38, `r1` → GPIO39; value = relay/pump state, `1`=on `0`=off
+- **Only the ids selected in V11 appear.** The V11 string lists exactly which of
+  `s0,s1,s2,r0,r1` to publish (e.g. `s2,r0;node1;<host>;30` publishes just
+  `{ "s2": …, "r0": … }`); a key you didn't enable is simply absent.
+- Published every `<interval>` s **and** immediately on any enabled relay change, so a
+  short pump run (default 10 s) is not missed by the periodic grid.
 
 **Exposed metrics** (sample at `http://<pi>:9641/metrics`):
 ```
@@ -89,7 +92,7 @@ A quick, history-free way to *watch* values arrive — no Prometheus query, no G
 
 Update rate = your publish cadence (V11 `interval`, default **60 s**, min **10 s**), except
 relay edges (`r0`/`r1`), which publish within ~1 s of a change. For faster moisture updates
-while testing, lower the V11 interval, e.g. `tomato;test;<pi-ip>;10`.
+while testing, lower the V11 interval, e.g. `s0,r0;test;<pi-ip>;10`.
 
 ### Enable a login (optional)
 

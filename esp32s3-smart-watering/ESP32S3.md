@@ -213,7 +213,7 @@ local broker (Raspberry Pi), where a `mqtt2prometheus` exporter turns them into
 Prometheus metrics. The broker + exporter stack lives in the repo's `monitoring/`
 directory; the firmware side is `Moisture.h` + `MqttPublisher.h`.
 
-**Sensor pins** (positional — channel `sN` → fixed GPIO):
+**Sensor pins** (channel `sN` → fixed GPIO):
 
 | Channel | GPIO  | ADC      | Header                                   |
 |---------|-------|----------|------------------------------------------|
@@ -228,27 +228,29 @@ directory; the firmware side is `Moisture.h` + `MqttPublisher.h`.
 **V11 config string** (set from the Blynk app; restored on every connect):
 
 ```
-<pin1>[,<pin2>[,<pin3>]] ; <device_name> ; <mqtt_host>[:<port>] ; <interval_s>
+<id>[,<id>...] ; <device_name> ; <mqtt_host>[:<port>] ; <interval_s>
 ```
 
-- pin names: 1–3 labels; the **count** picks how many channels are sampled. The names
-  are for humans only — the wire format is `s0/s1/s2` by channel, and friendly names
-  are mapped in Grafana (one dynamic MQTT/Prom label is spent on the device name).
+- ids: explicit list of metrics to publish, from `{s0,s1,s2,r0,r1}`, any order, no
+  duplicates, **at least one**. `sN` enables a channel, `rN` a relay. The wire keys are
+  exactly the ids listed — anything omitted is neither sampled nor published. (Friendly
+  sensor names live in Grafana; the one dynamic MQTT/Prom label is spent on the device name.)
 - `device_name`: charset `[A-Za-z0-9_-]`; becomes the topic segment + Prom `sensor` label.
 - `mqtt_host[:port]`: broker IP/host, port optional (default **1883**).
 - `interval_s`: publish period, optional (default **60**, clamped 10–3600).
-- A malformed string is rejected and echoed back as **`INVALID FORMAT`** (sampling stops).
+- A malformed string (empty first field, duplicate, unknown id, …) is rejected and echoed
+  back as **`INVALID FORMAT`** (sampling stops).
 
 ```
-example:  tomato,basil,mint;garden-node1;192.168.1.50:1883;60
+example:  s1,s2,r0;garden-node1;192.168.1.50:1883;60
 publishes: topic  watering/garden-node1/moisture
-           payload {"s0":2731,"s1":2540,"s2":2600,"r0":0,"r1":1}   every 60 s
+           payload {"s1":2540,"s2":2600,"r0":0}   every 60 s
 ```
 
-**Relay state** rides in the same message: `r0` (GPIO38) and `r1` (GPIO39), `1`=on
-`0`=off, mapped to a `relay_on` gauge. Both relays are always included, regardless of
-sensor count, and a relay change is published immediately (within ~1 s of the 1 Hz
-tick) so a short pump run isn't missed between periodic publishes.
+**Relay state** is published as a `relay_on` gauge: `r0` (GPIO38) and `r1` (GPIO39),
+`1`=on `0`=off — but only for the relays enabled in V11. An enabled relay's change is
+published immediately (within ~1 s of the 1 Hz tick) so a short pump run isn't missed
+between periodic publishes.
 
 A retained **Last Will** is registered on `watering/<device>/status` (`online`/`offline`)
 for future use; today liveness is handled by the exporter's `cache.timeout`.

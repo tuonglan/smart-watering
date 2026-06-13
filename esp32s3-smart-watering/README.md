@@ -132,27 +132,29 @@ ADC sampling) and `MqttPublisher.h` (PubSubClient wrapper).
 
 - Readings are **raw 12-bit ADC** (0–4095); raw→% calibration is done downstream
   (Grafana / Prometheus rules) so re-calibrating never means re-flashing.
-- **Both relay states** (`r0`/`r1`, 1=on) ride in the same message → a `relay_on`
-  gauge in Prometheus. They're published every interval **and** immediately on any
-  relay change, so a short pump run (default 10 s) isn't missed by the periodic grid.
+- **Relay states** (`r0`/`r1`, 1=on) → a `relay_on` gauge in Prometheus, but only the
+  relays you enable in V11. An enabled relay is published every interval **and**
+  immediately on any state change, so a short pump run (default 10 s) isn't missed by
+  the periodic grid.
 - Publishing goes to **your own broker, not Blynk** — it costs **zero** Blynk messages.
 - **ADC1 is required** (ADC2 is unusable while WiFi is on). GPIO4/5/6 sit on the
   camera/ADC header — free here because this build doesn't wire the camera
   (see `ESP32S3.md` §10).
-- ⚠️ **Only list as many pins as you physically wire.** An unconnected ADC pin floats
+- ⚠️ **Only enable channels you physically wire.** An unconnected ADC pin floats
   and publishes drifting noise, **not** `0`.
 
 ### Config string format (V11)
 
 ```
-<pin1>[,<pin2>[,<pin3>]] ; <device_name> ; <mqtt_host>[:<port>] ; <interval_s>
+<id>[,<id>...] ; <device_name> ; <mqtt_host>[:<port>] ; <interval_s>
 ```
 
-- **pins:** 1–3 comma-separated labels. The *count* selects how many channels are
-  sampled (positional: name 1 → GPIO4/`s0`, 2 → GPIO5/`s1`, 3 → GPIO6/`s2`). The names
-  are for humans only — the wire format is `s0/s1/s2` by channel, and friendly names
-  are mapped in **Grafana** (the one dynamic MQTT/Prometheus label is spent on the
-  device name).
+- **ids:** explicit list of which metrics to publish, from `{s0,s1,s2,r0,r1}`, in any
+  order, no duplicates, **at least one**. `sN` enables a moisture channel
+  (`s0`→GPIO4, `s1`→GPIO5, `s2`→GPIO6); `rN` enables a relay state (`r0`→GPIO38,
+  `r1`→GPIO39). The wire keys are exactly the ids listed — anything omitted is neither
+  sampled nor published. (Friendly sensor names live in **Grafana**, not here — the one
+  dynamic MQTT/Prometheus label is spent on the device name.)
 - **device_name:** charset `[A-Za-z0-9_-]`; becomes the MQTT topic segment + the
   Prometheus `sensor` label.
 - **mqtt_host[:port]:** broker IP/hostname; port optional (default **1883**).
@@ -162,11 +164,13 @@ Examples:
 
 | V11 string | Effect |
 |------------|--------|
-| `tomato,basil,mint;garden-node1;192.168.1.50:1883;60` | 3 sensors → `watering/garden-node1/moisture` every 60 s |
-| `tomato;balcony;mqtt.local` | 1 sensor, default port (1883) + interval (60 s) |
-| *(empty / malformed)* | rejected → `INVALID FORMAT`, sampling stops |
+| `s0,s1,s2,r0,r1;garden-node1;192.168.1.50:1883;60` | all 5 metrics → `watering/garden-node1/moisture` every 60 s |
+| `s2;balcony;mqtt.local` | only channel 2, no relays; default port (1883) + interval (60 s) |
+| `s1,s2,r0;node1;192.168.1.50;30` | channels 1 & 2 + relay 0, every 30 s |
+| *(empty first field / duplicate / unknown id / malformed)* | rejected → `INVALID FORMAT`, sampling stops |
 
-Publishes e.g. `{"s0":2731,"s1":2540,"s2":2600,"r0":0,"r1":1}`. A retained Last-Will on
+Publishes only the enabled keys, e.g. `s1,s2,r0;…` → `{"s1":2540,"s2":2600,"r0":0}`.
+A retained Last-Will on
 `watering/<device>/status` (`online`/`offline`) is registered for the future
 command/Grafana-annotation path.
 

@@ -2,9 +2,11 @@
 #
 # Contract with the ESP32-S3:
 #   topic:   watering/<device_name>/moisture
-#   payload: {"s0": <raw>, .., "r0": <0|1>, "r1": <0|1>}
-#            sN  = 12-bit ADC moisture value, 0..4095 (only the configured pins)
-#            rN  = relay/pump state, 1=on 0=off (always both relays)
+#   payload: {"s0": <raw>, .., "r0": <0|1>, ..}
+#            sN  = 12-bit ADC moisture value, 0..4095
+#            rN  = relay/pump state, 1=on 0=off
+#            Only the ids enabled in the device's V11 config appear; any of
+#            s0..s2 / r0..r1 may be absent, and that series simply won't show up.
 #
 # The <device_name> from the topic becomes the `sensor` label (exporter default).
 # Rename it to `device` in the Prometheus scrape config if you like (see README).
@@ -27,7 +29,8 @@ json_parsing:
   separator: .
 
 # Channels are fixed: s0->GPIO4, s1->GPIO5, s2->GPIO6.
-# A node that only configures 2 pins simply omits s2; that series just won't appear.
+# A node enables ids explicitly in V11, so any sN it doesn't select is simply absent
+# from the payload and that series never appears (same for the relays below).
 metrics:
   - prom_name: soil_moisture_raw
     mqtt_name: s0
@@ -50,8 +53,9 @@ metrics:
     const_labels:
       channel: "2"
 
-  # Relays are fixed: r0->GPIO38, r1->GPIO39. Published in every moisture message
-  # and immediately on any state change, so short pump runs are captured.
+  # Relays are fixed: r0->GPIO38, r1->GPIO39. When enabled in V11 they ride in every
+  # moisture message and publish immediately on any state change, so short pump runs
+  # are captured; a relay not selected in V11 is simply absent.
   - prom_name: relay_on
     mqtt_name: r0
     help: "Relay/pump state (1=on, 0=off). relay 0 / GPIO38"

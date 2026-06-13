@@ -36,7 +36,7 @@
 // ~1 s so short runs are not missed. See Moisture.h for the V11 string format and
 // monitoring/ for the broker + exporter stack.
 
-#define BLYNK_FIRMWARE_VERSION  "1.3.0"
+#define BLYNK_FIRMWARE_VERSION  "1.3.1"
 #define BLYNK_PRINT             Serial
 #define APP_DEBUG
 
@@ -456,29 +456,36 @@ void scheduleEvent() {
 
 // Moisture + relay publish tick (1 Hz). Self-paces to V11's interval via
 // last_publish_ms, so changing the interval needs no timer juggling. Also publishes
-// out of cadence whenever a relay changes state, so a short pump run (default 10 s)
-// is not missed by the periodic grid. Samples each configured channel, tacks on both
-// relay states, and pushes one MQTT message; a failed publish just retries next tick.
+// out of cadence whenever an enabled relay changes state, so a short pump run
+// (default 10 s) is not missed by the periodic grid. Samples each enabled channel,
+// tacks on each enabled relay state, and pushes one MQTT message; only the ids
+// selected in V11 are published. A failed publish just retries next tick.
 void moistureEvent() {
   if (!moistCfg.valid()) return;
 
-  bool relayOn[2] = { relays[0].isOn(), relays[1].isOn() };
-  bool relayChanged = (relayOn[0] != last_relay_state[0]) ||
-                      (relayOn[1] != last_relay_state[1]);
+  bool relayOn[MOIST_RELAYS]      = { relays[0].isOn(), relays[1].isOn() };
+  bool relayEnabled[MOIST_RELAYS] = { moistCfg.relayEnabled(0), moistCfg.relayEnabled(1) };
+
+  bool relayChanged = false;
+  for (uint8_t i = 0; i < MOIST_RELAYS; i++)
+    if (relayEnabled[i] && relayOn[i] != last_relay_state[i]) relayChanged = true;
 
   uint32_t now = millis();
   bool due = (last_publish_ms == 0) || ((now - last_publish_ms) >= moistCfg.intervalMs());
   if (!due && !relayChanged) return;
 
-  last_publish_ms     = now;
-  last_relay_state[0] = relayOn[0];
-  last_relay_state[1] = relayOn[1];
+  last_publish_ms = now;
+  for (uint8_t i = 0; i < MOIST_RELAYS; i++) last_relay_state[i] = relayOn[i];
 
-  int vals[MOIST_MAX_PINS];
-  uint8_t c = moistCfg.count();
-  for (uint8_t i = 0; i < c; i++) vals[i] = moistCfg.readChannel(i);
+  int  vals[MOIST_MAX_PINS];
+  bool chEnabled[MOIST_MAX_PINS];
+  for (uint8_t i = 0; i < MOIST_MAX_PINS; i++) {
+    chEnabled[i] = moistCfg.channelEnabled(i);
+    vals[i]      = chEnabled[i] ? moistCfg.readChannel(i) : 0;
+  }
 
-  bool ok = mqttPub.publish(vals, c, relayOn, 2);
+  bool ok = mqttPub.publish(vals, chEnabled, MOIST_MAX_PINS,
+                            relayOn, relayEnabled, MOIST_RELAYS);
   DEBUG_PRINT(ok ? "moisture: published" : "moisture: publish failed");
 }
 

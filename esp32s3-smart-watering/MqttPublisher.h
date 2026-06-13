@@ -5,8 +5,9 @@
 //
 // Wire contract (matches monitoring/mqtt2prometheus/config.yaml):
 //     topic:   watering/<device>/moisture
-//     payload: {"s0":<raw>,..,"r0":<0|1>,"r1":<0|1>}   (sN = configured channels,
-//              rN = relay/pump state — always both relays)
+//     payload: {"s0":<raw>,..,"r0":<0|1>,..}   (sN = enabled moisture channels,
+//              rN = enabled relay/pump states, 1=on; only the ids enabled in V11
+//              appear — a key absent means that metric was not selected)
 //     status:  watering/<device>/status  -> "online"/"offline" (retained, via LWT)
 //
 // The status topic is published for free via the MQTT Last Will & Testament: if this
@@ -53,10 +54,12 @@ public:
   // Service the MQTT keepalive/incoming. Call from loop().
   void loop() { if (_configured) _mqtt.loop(); }
 
-  // Build {"s0":..,"r0":..,..} and publish once. `vals`/`count` are the moisture
-  // channels; `relayOn`/`relayCount` the relay states (published as 1/0). Connects on
-  // demand. Returns true only if the broker accepted the publish.
-  bool publish(const int *vals, uint8_t count, const bool *relayOn, uint8_t relayCount) {
+  // Build {"s0":..,"r0":..,..} and publish once. Indices i in [0,count) / [0,relayCount)
+  // are emitted only where the matching chEnabled[i] / relayEnabled[i] is true, keyed by
+  // the real index (so a lone channel 2 publishes as "s2"). Connects on demand. Returns
+  // true only if the broker accepted the publish.
+  bool publish(const int *vals, const bool *chEnabled, uint8_t count,
+               const bool *relayOn, const bool *relayEnabled, uint8_t relayCount) {
     if (!_configured || WiFi.status() != WL_CONNECTED) return false;
     if (!_ensureConnected()) return false;
 
@@ -65,11 +68,13 @@ public:
     bool first = true;
     n += snprintf(payload + n, sizeof(payload) - n, "{");
     for (uint8_t i = 0; i < count; i++) {
+      if (!chEnabled[i]) continue;
       n += snprintf(payload + n, sizeof(payload) - n,
                     "%s\"s%u\":%d", (first ? "" : ","), (unsigned)i, vals[i]);
       first = false;
     }
     for (uint8_t i = 0; i < relayCount; i++) {
+      if (!relayEnabled[i]) continue;
       n += snprintf(payload + n, sizeof(payload) - n,
                     "%s\"r%u\":%d", (first ? "" : ","), (unsigned)i, relayOn[i] ? 1 : 0);
       first = false;

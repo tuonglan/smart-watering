@@ -12,22 +12,24 @@
 // free to use because this project does not wire the camera (see ESP32S3.md §2).
 //
 // Config string (V11, app->device):
-//     <pin1>[,<pin2>[,<pin3>]] ; <device_name> ; <mqtt_host>[:<port>] ; <interval_s>
-//   - pin names    : 1..3 comma-separated labels. The COUNT selects how many
-//                    channels are sampled (names map positionally to GPIO4/5/6).
-//                    The names themselves are NOT published — friendly names are a
-//                    Grafana-side concern; the wire format is s0/s1/s2 by channel.
-//                    They are kept only for logging/diagnostics. (Relay states r0/r1
-//                    are added to the published message by the .ino, not configured
-//                    here — they ride along whenever this config is valid.)
+//     <id>[,<id>...] ; <device_name> ; <mqtt_host>[:<port>] ; <interval_s>
+//   - ids          : explicit list of which metrics to publish, drawn from
+//                    {s0,s1,s2,r0,r1}, in any order, no duplicates, at least one.
+//                    sN selects a moisture channel (s0->GPIO4, s1->GPIO5, s2->GPIO6);
+//                    rN selects a relay/pump state (r0->GPIO38, r1->GPIO39, 1=on).
+//                    Anything omitted is neither sampled nor published — the wire
+//                    keys are exactly the ids listed here. (The relay states are
+//                    added to the message by the .ino; this config only chooses
+//                    whether each rN rides along.)
 //   - device_name  : becomes the MQTT topic segment + Prometheus `sensor` label.
 //                    charset [A-Za-z0-9_-], so it is always topic-safe.
 //   - mqtt_host    : broker hostname/IP, optional ":port" (default 1883).
 //   - interval_s   : publish period in seconds (optional, default 60, clamped
 //                    to [10, 3600]).
 //   examples:
-//     tomato,basil,mint;garden-node1;192.168.1.50:1883;60
-//     tomato;balcony;mqtt.local            (1 sensor, default port + interval)
+//     s0,s1,s2,r0,r1;garden-node1;192.168.1.50:1883;60   (all five)
+//     s2;balcony;mqtt.local                              (only channel 2, no relays)
+//     s1,s2,r0;node1;192.168.1.50;30                     (channels 1&2 + relay 0)
 //
 // The parser (parse/apply) is free of any Arduino/Blynk dependency so it can be
 // host-compiled and unit-tested, exactly like Schedule.h. Only readChannel() and
@@ -43,7 +45,7 @@
 #include <ctype.h>
 
 #define MOIST_MAX_PINS          3
-#define MOIST_NAME_LEN          16          // per pin label, incl. NUL
+#define MOIST_RELAYS            2           // r0->GPIO38, r1->GPIO39
 #define MOIST_DEV_LEN           32          // device name, incl. NUL
 #define MOIST_HOST_LEN          64          // broker host, incl. NUL
 
@@ -63,8 +65,11 @@ public:
   MoistureConfig() { _clear(); }
 
   bool     valid()      const { return _valid; }
-  uint8_t  count()      const { return _count; }
-  const char *name(uint8_t i) const { return (i < _count) ? _names[i] : ""; }
+  // Which metrics are enabled. ch in 0..MOIST_MAX_PINS-1, r in 0..MOIST_RELAYS-1.
+  bool     channelEnabled(uint8_t ch) const { return ch < MOIST_MAX_PINS && (_chMask    & (1u << ch)); }
+  bool     relayEnabled(uint8_t r)    const { return r  < MOIST_RELAYS   && (_relayMask & (1u << r)); }
+  uint8_t  channelCount() const { return _popcount(_chMask); }
+  uint8_t  relayCount()   const { return _popcount(_relayMask); }
   const char *device()  const { return _device; }
   const char *host()    const { return _host; }
   uint16_t port()       const { return _port; }
@@ -92,7 +97,7 @@ public:
     if (!raw) return false;
 
     // Bounded working copy (sized for the longest plausible V11 string).
-    char buf[MOIST_NAME_LEN * MOIST_MAX_PINS + MOIST_DEV_LEN + MOIST_HOST_LEN + 16];
+    char buf[3 * (MOIST_MAX_PINS + MOIST_RELAYS) + MOIST_DEV_LEN + MOIST_HOST_LEN + 16];
     size_t len = strlen(raw);
     if (len == 0 || len >= sizeof(buf)) return false;
     memcpy(buf, raw, len + 1);
@@ -103,17 +108,15 @@ public:
     uint8_t nsec = _split(buf, ';', sec, 4);
     if (nsec < 3) return false;
 
-    // --- section 0: pin names (1..3, comma-separated) ---
-    if (_countChar(sec[0], ',') > MOIST_MAX_PINS - 1) return false;
-    char *pin[MOIST_MAX_PINS];
-    uint8_t np = _split(sec[0], ',', pin, MOIST_MAX_PINS);
-    for (uint8_t i = 0; i < np; i++) {
-      _trim(pin[i]);
-      size_t pl = strlen(pin[i]);
-      if (pl == 0 || pl >= MOIST_NAME_LEN) return false;
-      memcpy(_names[i], pin[i], pl + 1);
+    // --- section 0: explicit metric ids (s0..s2 / r0..r1, comma-separated) ---
+    if (_countChar(sec[0], ',') > MOIST_MAX_PINS + MOIST_RELAYS - 1) return false;
+    char *id[MOIST_MAX_PINS + MOIST_RELAYS];
+    uint8_t nid = _split(sec[0], ',', id, MOIST_MAX_PINS + MOIST_RELAYS);
+    for (uint8_t i = 0; i < nid; i++) {
+      _trim(id[i]);
+      if (!_addId(id[i])) return false;       // validates s0..s2/r0..r1, rejects dup
     }
-    _count = np;
+    if (_chMask == 0 && _relayMask == 0) return false;   // must publish something
 
     // --- section 1: device name (topic-safe charset) ---
     _trim(sec[1]);
@@ -152,9 +155,9 @@ public:
     analogSetAttenuation(ADC_11db);   // ~0-3.3 V; alias of ADC_ATTEN_DB_12 on core 3.x
   }
 
-  // Averaged raw reading for channel i (0..count-1), or -1 if out of range.
+  // Averaged raw reading for channel i, or -1 if that channel is not enabled.
   int readChannel(uint8_t i) const {
-    if (i >= _count) return -1;
+    if (!channelEnabled(i)) return -1;
     uint32_t acc = 0;
     for (uint8_t n = 0; n < MOIST_SAMPLES; n++) acc += analogRead(MOIST_ADC_GPIO[i]);
     return (int)(acc / MOIST_SAMPLES);
@@ -162,8 +165,8 @@ public:
 #endif
 
 private:
-  char     _names[MOIST_MAX_PINS][MOIST_NAME_LEN];
-  uint8_t  _count;
+  uint8_t  _chMask;        // bit i set -> channel i (s<i>) enabled
+  uint8_t  _relayMask;     // bit i set -> relay   i (r<i>) enabled
   char     _device[MOIST_DEV_LEN];
   char     _host[MOIST_HOST_LEN];
   uint16_t _port;
@@ -171,13 +174,41 @@ private:
   bool     _valid;
 
   void _clear() {
-    for (uint8_t i = 0; i < MOIST_MAX_PINS; i++) _names[i][0] = '\0';
-    _count      = 0;
+    _chMask     = 0;
+    _relayMask  = 0;
     _device[0]  = '\0';
     _host[0]    = '\0';
     _port       = MOIST_DEFAULT_PORT;
     _interval_s = MOIST_DEFAULT_INTERVAL;
     _valid      = false;
+  }
+
+  // Set the bit for one id token ("s0".."s2" / "r0".."r1"). Returns false on a
+  // malformed token, an out-of-range index, or a duplicate.
+  bool _addId(const char *s) {
+    if (strlen(s) != 2 || !isdigit((unsigned char)s[1])) return false;
+    uint8_t idx = (uint8_t)(s[1] - '0');
+    if (s[0] == 's') {
+      if (idx >= MOIST_MAX_PINS) return false;
+      uint8_t bit = (uint8_t)(1u << idx);
+      if (_chMask & bit) return false;
+      _chMask |= bit;
+      return true;
+    }
+    if (s[0] == 'r') {
+      if (idx >= MOIST_RELAYS) return false;
+      uint8_t bit = (uint8_t)(1u << idx);
+      if (_relayMask & bit) return false;
+      _relayMask |= bit;
+      return true;
+    }
+    return false;
+  }
+
+  static uint8_t _popcount(uint8_t m) {
+    uint8_t n = 0;
+    for (; m; m >>= 1) n += (m & 1u);
+    return n;
   }
 
   static uint8_t _countChar(const char *s, char c) {
