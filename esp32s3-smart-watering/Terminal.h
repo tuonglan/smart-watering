@@ -43,6 +43,7 @@ static void termPrintGuide(WidgetTerminal &term) {
   term.println(" ping <ip|host>   ICMP echo, RTT in ms");
   term.println(" get_moisture     raw ADC s0/s1/s2 (GPIO4/5/6)");
   term.println(" help             show this guide");
+  term.println(" clear            wipe the terminal");
   term.println("empty line = stop");
 }
 
@@ -58,6 +59,10 @@ public:
   // human-readable output to `term`; the manager flushes afterwards. Called once per
   // entry, plus every 1 Hz tick while in continuous mode.
   virtual void run(const char *args, WidgetTerminal &term) = 0;
+  // Whether this command should keep re-running each tick in continuous mode (V42=1).
+  // Most commands do. A one-shot command (e.g. clear) overrides this to false so it runs
+  // exactly once regardless of mode — it is "immune" to continuous mode.
+  virtual bool repeatable() const { return true; }
 };
 
 // ping <ip|host> — one ICMP echo, prints the round-trip time (or "timeout").
@@ -94,6 +99,16 @@ class HelpCommand : public TermCommand {
 public:
   const char *name() const override { return "help"; }
   void run(const char * /*args*/, WidgetTerminal &term) override { termPrintGuide(term); }
+  bool repeatable() const override { return false; }   // run once even in continuous mode
+};
+
+// clear — wipe the terminal scrollback (WidgetTerminal::clear() sends Blynk's reserved
+// "clr" string, which the widget interprets as "erase the display").
+class ClearCommand : public TermCommand {
+public:
+  const char *name() const override { return "clear"; }
+  void run(const char * /*args*/, WidgetTerminal &term) override { term.clear(); }
+  bool repeatable() const override { return false; }   // run once even in continuous mode
 };
 
 // ------------------------------------------------------------------ //
@@ -106,6 +121,7 @@ public:
     _table[0] = &_ping;
     _table[1] = &_moist;
     _table[2] = &_help;
+    _table[3] = &_clear;
     _args[0]  = '\0';
   }
 
@@ -149,13 +165,15 @@ public:
     _lastChangeMs = millis();
     _lastCmd      = cmd;             // remember it for the V43 re-run button
 
+    // A non-repeatable command (e.g. clear) runs once even in continuous mode.
+    bool willRepeat = continuous && cmd->repeatable();
     LOG_INFO(String("terminal: run '") + buf + (_args[0] ? String(" ") + _args : String("")) +
-             "' (" + (continuous ? "continuous @1Hz" : "once") + ")");
+             "' (" + (willRepeat ? "continuous @1Hz" : "once") + ")");
 
     cmd->run(_args, _term);          // immediate feedback (both modes)
     _term.flush();
 
-    _active = continuous ? cmd : nullptr;   // keep running only in continuous mode
+    _active = willRepeat ? cmd : nullptr;   // keep running only if it repeats
   }
 
   // 1 Hz tick. `continuous` is the current V42 mode. Idle (returns immediately) unless
@@ -200,14 +218,17 @@ public:
     }
 
     _lastChangeMs = millis();                       // restart the 5-min window
+
+    // A non-repeatable command (e.g. clear) runs once even in continuous mode.
+    bool willRepeat = continuous && _lastCmd->repeatable();
     LOG_INFO(String("terminal: re-run '") + _lastCmd->name() +
              (_args[0] ? String(" ") + _args : String("")) +
-             "' (" + (continuous ? "continuous @1Hz" : "once") + ")");
+             "' (" + (willRepeat ? "continuous @1Hz" : "once") + ")");
 
     _lastCmd->run(_args, _term);
     _term.flush();
 
-    if (continuous) {
+    if (willRepeat) {
       _active = _lastCmd;                           // keep tailing; V43 stays 1
     } else {
       _active = nullptr;
@@ -239,7 +260,8 @@ private:
   PingCommand        _ping;
   GetMoistureCommand _moist;
   HelpCommand        _help;
-  TermCommand       *_table[3];     // command registry
+  ClearCommand       _clear;
+  TermCommand       *_table[4];     // command registry
   TermCommand       *_active;       // cached parsed command (nullptr = idle)
   TermCommand       *_lastCmd;      // last valid command entered, for the V43 re-run button
   char               _args[CMD_MAX];// cached args for _active / _lastCmd

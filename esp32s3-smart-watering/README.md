@@ -238,7 +238,8 @@ connect).
 |---------|--------|-------|
 | `ping <ip\|host>` | `ping 8.8.8.8 : 12.3 ms` (or `timeout`) | one ICMP echo via **ESP32Ping**; blocking up to ~1 s |
 | `get_moisture`    | `s0=4095  s1=0234  s2=0012`              | raw averaged ADC for **all three** channels (GPIO4/5/6), zero-padded for alignment; ignores the V11 enabled mask so you can probe an unwired/just-connected sensor |
-| `help`            | the command guide                        | same text printed once at boot |
+| `help`            | the command guide                        | same text printed once at boot; **runs once even in continuous mode** |
+| `clear`           | *(wipes the scrollback)*                 | sends Blynk's reserved `clr` to the widget via `WidgetTerminal::clear()`; **runs once even in continuous mode** (it overrides `repeatable()` → false) |
 
 The Terminal widget itself renders a readable transcript — your input prefixed `>`,
 device output prefixed `<` — so the firmware doesn't echo anything (that would double
@@ -252,6 +253,10 @@ Commands use a small **base-class + derived-class** framework in `Terminal.h`: s
 `TermCommand` (implement `name()` and `run(args, term)`) and add one row to the table in
 `TerminalManager`. The typed line is parsed **once** on input (command looked up + args
 cached); the 1 Hz tick re-runs the cached command with **no re-parsing** per tick.
+
+Override `repeatable()` → `false` to make a command one-shot — it then runs exactly once
+even when V42 is in continuous mode (and the V43 re-run button releases after it). `clear`
+uses this; it's the natural choice for any command that has no business repeating.
 
 > ⚠️ **Quota & blocking.** In continuous mode every tick prints one line =
 > **1 Blynk message/second** (~300 over the 5-minute cap) — fine for short debugging,

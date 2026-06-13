@@ -20,7 +20,8 @@
 //       boot ROM messages and Blynk's own banner/output always print. See
 //       Settings.h for the LOG_* macros. Default 0 at boot; synced from app.
 //   V41 Debug terminal   (WidgetTerminal, app↔device — type debug commands, see
-//       output on the same widget). Commands: "ping <ip|host>", "get_moisture", "help".
+//       output on the same widget). Commands: "ping <ip|host>", "get_moisture", "help",
+//       "clear".
 //       Parsed once + cached; run by terminalEvent. NOT synced on reconnect. A help
 //       guide is printed once on the first connection after boot. See Terminal.h.
 //   V42 Terminal mode    (Switch, app→device — 1 = re-run the entered command at 1 Hz
@@ -49,7 +50,7 @@
 // ~1 s so short runs are not missed. See Moisture.h for the V11 string format and
 // monitoring/ for the broker + exporter stack.
 
-#define BLYNK_FIRMWARE_VERSION  "1.4.1"
+#define BLYNK_FIRMWARE_VERSION  "1.4.2"
 #define BLYNK_PRINT             Serial
 #define APP_DEBUG
 
