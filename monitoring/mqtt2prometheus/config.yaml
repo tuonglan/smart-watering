@@ -1,0 +1,50 @@
+# mqtt2prometheus: subscribes to the moisture topic, exposes /metrics on :9641.
+#
+# Contract with the ESP32-S3:
+#   topic:   watering/<device_name>/moisture
+#   payload: {"s0": <raw>, "s1": <raw>, "s2": <raw>}   (only the configured pins)
+#            raw = 12-bit ADC value, 0..4095
+#
+# The <device_name> from the topic becomes the `sensor` label (exporter default).
+# Rename it to `device` in the Prometheus scrape config if you like (see README).
+
+mqtt:
+  server: tcp://mosquitto:1883
+  topic_path: watering/+/moisture
+  device_id_regex: "watering/(?P<deviceid>[^/]+)/moisture"
+  qos: 0
+  # user: esp32
+  # password: changeme
+
+cache:
+  # Drop a device's series if no message arrives within this window, so a dead
+  # node disappears from Prometheus instead of showing a frozen last value.
+  # Rule of thumb: ~3x the publish interval set in V11 (default 60s -> 180s).
+  timeout: 180s
+
+json_parsing:
+  separator: .
+
+# Channels are fixed: s0->GPIO4, s1->GPIO5, s2->GPIO6.
+# A node that only configures 2 pins simply omits s2; that series just won't appear.
+metrics:
+  - prom_name: soil_moisture_raw
+    mqtt_name: s0
+    help: "Raw ADC moisture reading (0-4095). channel 0 / GPIO4"
+    type: gauge
+    const_labels:
+      channel: "0"
+
+  - prom_name: soil_moisture_raw
+    mqtt_name: s1
+    help: "Raw ADC moisture reading (0-4095). channel 1 / GPIO5"
+    type: gauge
+    const_labels:
+      channel: "1"
+
+  - prom_name: soil_moisture_raw
+    mqtt_name: s2
+    help: "Raw ADC moisture reading (0-4095). channel 2 / GPIO6"
+    type: gauge
+    const_labels:
+      channel: "2"

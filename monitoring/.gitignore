@@ -1,0 +1,2 @@
+# local secrets if you enable auth later
+mosquitto/config/passwd
