@@ -29,9 +29,12 @@ auth token are provisioned at runtime via the Blynk app (no hardcoded secrets).
 | V10 | Schedule       | **String**      | start-time config (see Scheduling), app→device |
 | V11 | Moisture cfg   | **String**      | sensor + MQTT config (see Soil-moisture), app→device |
 | V40 | Log level      | Integer 0–4     | serial verbosity (see Logging), app→device |
+| V41 | Debug terminal | **Terminal**    | type debug commands, output on same widget (see Debug terminal), app↔device |
+| V42 | Terminal mode  | Switch 0/1      | 1 = run command @1 Hz, 0 = run once (see Debug terminal), app→device |
 
 > **V8, V9, V10, and V11 must be String datastreams** in the Blynk console (not
-> Integer), or the text is dropped. **V40 is an Integer** datastream (range 0–4).
+> Integer), or the text is dropped. **V40 and V42 are Integer** datastreams (V40 range
+> 0–4, V42 a 0/1 switch). **V41 is a Terminal** widget bound to a String datastream.
 
 > The `.ino` defines readable `#define VPIN_*` aliases for every pin above (e.g.
 > `VPIN_MOISTURE_CFG` → V11); the table here is the canonical reference.
@@ -56,8 +59,15 @@ Install both via **Tools → Manage Libraries** (or `arduino-cli lib install`, b
   pulls it in.
 - **PubSubClient** (Nick O'Leary) — MQTT client used by `MqttPublisher.h` for the
   soil-moisture push.
+- **ESP32Ping** (Marian Craciunescu) — used by the `ping` command in `Terminal.h`.
+  ⚠️ **Not in the Library Manager index** — install it from GitHub:
 
-Without either, the sketch won't compile.
+  ```bash
+  git clone --depth 1 https://github.com/marian-craciunescu/ESP32Ping.git \
+    ~/Arduino/libraries/ESP32Ping
+  ```
+
+Without all three, the sketch won't compile.
 
 ## Safety design
 
@@ -189,6 +199,53 @@ PubSubClient does not reconnect on its own; the per-interval attempt is what hea
 The brief stall never affects pump safety: the hardware `esp_timer` failsafe runs on
 its own task, independent of `loop()`.
 
+## Debug terminal (V41 / V42)
+
+A **Terminal** widget on **V41** lets you type ad-hoc debug commands and read their
+output **on the same widget** — a WidgetTerminal uses one virtual pin for both
+directions (app→device input arrives as a write; device→app output is appended to the
+scrollback, so there is no second "stream" to wire). A **Switch** on **V42** picks the
+run mode:
+
+- **V42 = 0 (run once):** the command runs once when you send it. The value is kept (no
+  auto-clear) — resend it, even the *same* text, to run again (a Terminal fires on every
+  send, not only on change).
+- **V42 = 1 (continuous):** the command re-runs **every second (1 Hz)** — a live tail —
+  until you clear it (send an empty line), flip V42 off, or the **5-minute auto-stop**
+  fires. The auto-stop also clears V41 on Blynk, so a command left running by accident
+  can't quietly drain your message quota (see Blynk message budget).
+
+On the **first connection after boot** (not on reconnects) a brief command guide is
+printed to the terminal. V41 is deliberately **not** restored on reconnect, so a stale
+command never auto-resumes after a reboot.
+
+### Commands
+
+| Command | Output | Notes |
+|---------|--------|-------|
+| `ping <ip\|host>` | `ping 8.8.8.8 : 12.3 ms` (or `timeout`) | one ICMP echo via **ESP32Ping**; blocking up to ~1 s |
+| `get_moisture`    | `s0=4095  s1=0234  s2=0012`              | raw averaged ADC for **all three** channels (GPIO4/5/6), zero-padded for alignment; ignores the V11 enabled mask so you can probe an unwired/just-connected sensor |
+| `help`            | the command guide                        | same text printed once at boot |
+
+The Terminal widget itself renders a readable transcript — your input prefixed `>`,
+device output prefixed `<` — so the firmware doesn't echo anything (that would double
+the command line). The input box clears on send (standard widget behaviour, can't be
+refilled), so re-running means retyping. An unknown command prints
+`unknown command — type 'help'`; an empty line stops a running command.
+
+### Extending it
+
+Commands use a small **base-class + derived-class** framework in `Terminal.h`: subclass
+`TermCommand` (implement `name()` and `run(args, term)`) and add one row to the table in
+`TerminalManager`. The typed line is parsed **once** on input (command looked up + args
+cached); the 1 Hz tick re-runs the cached command with **no re-parsing** per tick.
+
+> ⚠️ **Quota & blocking.** In continuous mode every tick prints one line =
+> **1 Blynk message/second** (~300 over the 5-minute cap) — fine for short debugging,
+> just don't leave it running. `ping` blocks `loop()` for up to ~1 s while waiting for a
+> reply; the relay hardware `esp_timer` failsafe is independent of `loop()`, so pump
+> safety is never affected.
+
 ## Logging / serial verbosity (V40)
 
 The firmware's own serial logging is controlled at **runtime** by virtual pin **V40**
@@ -262,11 +319,26 @@ From the V10 handler, `scheduleEvent()`, and `onScheduleTrigger()` (the `Schedul
 | Blynk connected, NTP (re)started | DEBUG | `blynk: connected — NTP (re)started, syncing datastreams` |
 | Each device-datetime push (every 5 min) | DEBUG | `datetime: 2026-06-14 09:35:00 +07` |
 
+### What you actually see — debug terminal
+
+From `Terminal.h` (lifecycle only — the per-tick command output already appears in the
+terminal widget, so it isn't duplicated to the serial log):
+
+| Event | Level | Example line |
+|-------|-------|--------------|
+| Command accepted | INFO | `terminal: run 'ping 8.8.8.8' (continuous @1Hz)` |
+| Run mode changed (V42) | INFO | `terminal mode -> continuous` |
+| Unknown command | WARN | `terminal: unknown command 'foo'` |
+| Cleared by empty input | INFO | `terminal: cleared by empty input — stopped` |
+| Live tail stopped (V42 off) | INFO | `terminal: live tail stopped (V42 off)` |
+| Auto-stopped after 5 min | WARN | `terminal: auto-stopped after 5 min (quota guard)` |
+
 > **Why these logs live in the `.ino`, not the headers.** `Moisture.h`, `Schedule.h`, and
 > `TimeManager.h` are deliberately free of any Arduino/Blynk dependency so their parsers
 > can be host-compiled and unit-tested with plain `g++`. Adding `LOG_*` (which expand to
 > Blynk logging) inside them would break that, so their logging is done at the call sites
-> in the `.ino`. `MqttPublisher.h` already depends on WiFi/PubSubClient, so it logs inline.
+> in the `.ino`. `MqttPublisher.h` and `Terminal.h` already depend on WiFi/Blynk (and
+> ESP32Ping), so they log inline.
 
 ## Arduino IDE settings (ESP32-S3 N16R8)
 
@@ -306,6 +378,9 @@ Same toolchain as the IDE, scripted. Verified with **arduino-cli 1.5.x** and the
 arduino-cli core update-index
 arduino-cli core install esp32:esp32
 arduino-cli lib install "Adafruit NeoPixel" "PubSubClient" "Blynk"
+# ESP32Ping is GitHub-only (not in the index) — clone it into the libraries dir:
+git clone --depth 1 https://github.com/marian-craciunescu/ESP32Ping.git \
+  ~/Arduino/libraries/ESP32Ping
 ```
 
 The FQBN options below mirror the **Tools** menu in the IDE table above (notably the
@@ -431,6 +506,11 @@ connected device costs nothing on its own.
 | Conflict-reject writes          | conflicting command sent         | 1 msg (rare)               |
 | Reconnect `syncVirtual` (V0–V7, V10, V11) | each Blynk reconnect   | ~10 msgs                   |
 | Inbound app commands            | each button/slider from phone    | 1 msg each                 |
+| **Debug terminal (V41)**, continuous | each 1 s tick while active | 1/s, **≤300/run** (5-min auto-stop) |
+
+> The continuous terminal is a **debug-only** burst, not part of the steady-state total
+> below — the 5-minute auto-stop caps a forgotten command at ~300 messages. Run-once mode
+> costs only the lines it prints.
 
 > ⚠️ **The uptime timer was the budget-killer.** At a 1 s interval it would send
 > **86,400 msgs/day** (~2.6M/month) — it alone would blow the monthly quota in

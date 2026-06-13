@@ -19,6 +19,12 @@
 //       0=OFF 1=ERROR 2=WARN 3=INFO 4=DEBUG. Gates OUR logs only; the ESP32
 //       boot ROM messages and Blynk's own banner/output always print. See
 //       Settings.h for the LOG_* macros. Default 0 at boot; synced from app.
+//   V41 Debug terminal   (WidgetTerminal, app↔device — type debug commands, see
+//       output on the same widget). Commands: "ping <ip|host>", "get_moisture", "help".
+//       Parsed once + cached; run by terminalEvent. NOT synced on reconnect. A help
+//       guide is printed once on the first connection after boot. See Terminal.h.
+//   V42 Terminal mode    (Switch, app→device — 1 = re-run the entered command at 1 Hz
+//       until cleared / flipped off / 5-min auto-stop; 0 = run once per entry).
 //
 // Relay index = vpin / 4 , pin offset = vpin % 4
 //
@@ -40,7 +46,7 @@
 // ~1 s so short runs are not missed. See Moisture.h for the V11 string format and
 // monitoring/ for the broker + exporter stack.
 
-#define BLYNK_FIRMWARE_VERSION  "1.3.3"
+#define BLYNK_FIRMWARE_VERSION  "1.4.1"
 #define BLYNK_PRINT             Serial
 #define APP_DEBUG
 
@@ -66,6 +72,7 @@
 #include "Schedule.h"      // schedule parsing + per-second engine (Blynk-free)
 #include "Moisture.h"      // V11 config parsing + ADC1 sampling
 #include "MqttPublisher.h" // moisture -> local MQTT broker (needs PubSubClient lib)
+#include "Terminal.h"      // V41 debug WidgetTerminal + command framework (needs ESP32Ping lib)
 
 // ------------------------------------------------------------------ //
 //  Virtual-pin aliases                                                 //
@@ -87,6 +94,8 @@
 #define VPIN_SCHEDULE_CFG    V10
 #define VPIN_MOISTURE_CFG    V11
 #define VPIN_LOG_LEVEL       V40
+#define VPIN_TERMINAL        V41   // WidgetTerminal: debug command in/out (see Terminal.h)
+#define VPIN_TERM_MODE       V42   // Switch: 1 = run command @1Hz, 0 = run once
 
 // ------------------------------------------------------------------ //
 //  Hardware pin for each relay                                         //
@@ -365,6 +374,10 @@ MqttPublisher   mqttPub;                     // pushes readings to the local bro
 uint32_t        last_publish_ms = 0;         // 0 = publish on the next tick
 bool            last_relay_state[2] = { false, false };  // edge-detect for out-of-cadence publishes
 
+TerminalManager dbgTerm;                     // V41 debug console + command framework
+bool            g_termContinuous = false;    // V42: true = re-run command @1Hz, false = once
+bool            g_termHelpShown   = false;   // latch: print the V41 help once, on first connect
+
 // Scheduler asks us to start a relay; we honour the "skip if already running" rule.
 static void onScheduleTrigger(uint8_t relay_idx, void * /*ctx*/) {
   if (relay_idx >= 2) return;
@@ -415,9 +428,18 @@ BLYNK_CONNECTED() {
   DEBUG_PRINT("blynk: connected — NTP (re)started, syncing datastreams");
   // V10 restores the stored schedule, V11 the moisture/MQTT config (each triggers
   // its BLYNK_WRITE below).
+  // V42 restores the terminal run mode. V41 is deliberately NOT synced: a command left
+  // in the terminal datastream must not auto-resume after a reboot/reconnect.
   Blynk.syncVirtual(VPIN_RELAY0_SWITCH, VPIN_RELAY0_RUNTIME, VPIN_RELAY0_TIMEON, VPIN_RELAY0_RUNMAX,
                     VPIN_RELAY1_SWITCH, VPIN_RELAY1_RUNTIME, VPIN_RELAY1_TIMEON, VPIN_RELAY1_RUNMAX,
-                    VPIN_SCHEDULE_CFG, VPIN_MOISTURE_CFG, VPIN_LOG_LEVEL);
+                    VPIN_SCHEDULE_CFG, VPIN_MOISTURE_CFG, VPIN_LOG_LEVEL, VPIN_TERM_MODE);
+
+  // Print the command guide once per boot (on the first connection), not on every
+  // reconnect — so a WiFi blip doesn't spam the terminal.
+  if (!g_termHelpShown) {
+    dbgTerm.printHelp();
+    g_termHelpShown = true;
+  }
 }
 
 // Runtime serial-log verbosity from the app (0=OFF 1=ERROR 2=WARN 3=INFO 4=DEBUG).
@@ -430,6 +452,18 @@ BLYNK_WRITE(VPIN_LOG_LEVEL) {
   if (v > LOG_LEVEL_DEBUG) v = LOG_LEVEL_DEBUG;
   g_logLevel = (uint8_t)v;
   BLYNK_LOG1(String("log level -> ") + g_logLevel);
+}
+
+// Debug terminal (V41): a typed line. Parsed + cached in onInput() and run once for
+// immediate feedback; if V42 (continuous) is on it keeps re-running via terminalEvent.
+BLYNK_WRITE(VPIN_TERMINAL) {
+  dbgTerm.onInput(param.asStr(), g_termContinuous);
+}
+
+// Terminal run mode (V42): 1 = re-run the entered command continuously @1Hz, 0 = once.
+BLYNK_WRITE(VPIN_TERM_MODE) {
+  g_termContinuous = (param.asInt() != 0);
+  LOG_INFO(String("terminal mode -> ") + (g_termContinuous ? "continuous" : "once"));
 }
 
 // Schedule config from the app. Parse, (re)arm, and echo "INVALID FORMAT" back for
@@ -563,6 +597,12 @@ void moistureEvent() {
   if (ok) LOG_INFO("moisture: published");
 }
 
+// Debug-terminal tick (1 Hz). Idle unless a continuous (V42=1) command is cached; then
+// it re-runs that command and enforces the 5-min auto-stop quota guard. See Terminal.h.
+void terminalEvent() {
+  dbgTerm.tick(g_termContinuous);
+}
+
 // ------------------------------------------------------------------ //
 //  Arduino entry points                                                //
 // ------------------------------------------------------------------ //
@@ -583,6 +623,7 @@ void setup() {
   mainTimer.setInterval(300000L, datetimeEvent);  // V9 device datetime every 5 min
   mainTimer.setInterval(1000L,   scheduleEvent);  // schedule engine — 1 Hz, sends nothing unless it fires a relay
   mainTimer.setInterval(1000L,   moistureEvent);  // moisture publish — 1 Hz tick, self-paced to V11 interval
+  mainTimer.setInterval(1000L,   terminalEvent);  // V41 debug terminal — 1 Hz tick, idle unless a command is active
 
   // Edgent handles WiFi provisioning, auth token storage, OTA, and
   // the factory-reset button (GPIO0 held 5 s).

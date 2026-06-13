@@ -158,6 +158,14 @@ public:
   // Averaged raw reading for channel i, or -1 if that channel is not enabled.
   int readChannel(uint8_t i) const {
     if (!channelEnabled(i)) return -1;
+    return readRaw(i);
+  }
+
+  // Averaged raw reading for channel i, IGNORING the enabled mask (-1 if i is out of
+  // range). For debug/diagnostics (e.g. the V41 get_moisture command) that wants to
+  // see every sensor regardless of what V11 selected for publishing.
+  static int readRaw(uint8_t i) {
+    if (i >= MOIST_MAX_PINS) return -1;
     uint32_t acc = 0;
     for (uint8_t n = 0; n < MOIST_SAMPLES; n++) acc += analogRead(MOIST_ADC_GPIO[i]);
     return (int)(acc / MOIST_SAMPLES);
