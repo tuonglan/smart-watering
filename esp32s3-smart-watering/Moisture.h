@@ -155,12 +155,20 @@ public:
     analogSetAttenuation(ADC_11db);   // ~0-3.3 V; alias of ADC_ATTEN_DB_12 on core 3.x
   }
 
-  // Averaged raw reading for channel i, or -1 if that channel is not enabled.
-  int readChannel(uint8_t i) const {
-    if (!channelEnabled(i)) return -1;
+  // Averaged raw reading of channel i ignoring the enable mask. Used by the
+  // calibration stream (V12-V14 -> V15-V17 in the .ino), which must be able to read a
+  // sensor even when it is not in the V11 publish list. Returns -1 for a bad index.
+  static int readRaw(uint8_t i) {
+    if (i >= MOIST_MAX_PINS) return -1;
     uint32_t acc = 0;
     for (uint8_t n = 0; n < MOIST_SAMPLES; n++) acc += analogRead(MOIST_ADC_GPIO[i]);
     return (int)(acc / MOIST_SAMPLES);
+  }
+
+  // Averaged raw reading for channel i, or -1 if that channel is not enabled in V11.
+  int readChannel(uint8_t i) const {
+    if (!channelEnabled(i)) return -1;
+    return readRaw(i);
   }
 #endif
 

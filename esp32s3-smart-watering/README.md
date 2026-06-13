@@ -28,10 +28,18 @@ auth token are provisioned at runtime via the Blynk app (no hardcoded secrets).
 | V9  | Device time    | **String**      | `YYYY-MM-DD HH:MM:SS +07` local, read-only, every 5 min |
 | V10 | Schedule       | **String**      | start-time config (see Scheduling), app→device |
 | V11 | Moisture cfg   | **String**      | sensor + MQTT config (see Soil-moisture), app→device |
+| V12 | Cal flag ch0   | switch 0/1      | stream sensor 0 raw ADC to V15 (see Calibration), app→device |
+| V13 | Cal flag ch1   | switch 0/1      | stream sensor 1 raw ADC to V16, app→device |
+| V14 | Cal flag ch2   | switch 0/1      | stream sensor 2 raw ADC to V17, app→device |
+| V15 | Cal value ch0  | display (int)   | raw ADC of sensor 0 while V12 is on, read-only |
+| V16 | Cal value ch1  | display (int)   | raw ADC of sensor 1 while V13 is on, read-only |
+| V17 | Cal value ch2  | display (int)   | raw ADC of sensor 2 while V14 is on, read-only |
 | V40 | Log level      | Integer 0–4     | serial verbosity (see Logging), app→device |
 
 > **V8, V9, V10, and V11 must be String datastreams** in the Blynk console (not
 > Integer), or the text is dropped. **V40 is an Integer** datastream (range 0–4).
+> **V12–V14 are switches** (Integer 0/1) and **V15–V17 are Integer** value displays
+> (range 0–4095).
 
 > The `.ino` defines readable `#define VPIN_*` aliases for every pin above (e.g.
 > `VPIN_MOISTURE_CFG` → V11); the table here is the canonical reference.
@@ -189,6 +197,36 @@ PubSubClient does not reconnect on its own; the per-interval attempt is what hea
 The brief stall never affects pump safety: the hardware `esp_timer` failsafe runs on
 its own task, independent of `loop()`.
 
+## Sensor calibration (live raw values in the app)
+
+Raw→% calibration is done downstream (Grafana/Prometheus), but to find the dry/wet
+endpoints you first need to **see a sensor's raw ADC live** while you dunk it in dry
+soil, then water. That's what V12–V17 are for — a short-lived, on-demand stream
+straight to the Blynk app, no MQTT/Grafana round-trip needed.
+
+- **One flag per channel:** **V12 → V15** (sensor 0), **V13 → V16** (sensor 1),
+  **V14 → V17** (sensor 2). Flip a flag **on** and that channel's raw 12-bit ADC
+  (0–4095, 16-sample averaged — the same smoothing as the MQTT path) is pushed to its
+  value pin **once a second**. Flip it off and the stream stops.
+- **Independent of V11.** Calibration reads the ADC directly (`MoistureConfig::readRaw`),
+  so you can calibrate a sensor **even if it isn't in your V11 publish list**. V11 and
+  the calibration stream don't affect each other.
+- **5-minute auto-off.** Each flag is force-cleared after **5 minutes**
+  (`MOIST_CAL_MAX_ON_MS`) and the app toggle is reset to off, so a flag left on by
+  mistake can't quietly drain your Blynk quota. Long enough for a calibration session,
+  short enough to be safe — just flip it back on if you need more time.
+- **Off after a reboot.** The flags are **not** synced down on reconnect — they default
+  **off** at boot. Instead the device pushes its *actual* flag state **up** on every
+  connect, so the app toggle can never show "on" while nothing is streaming (and a brief
+  WiFi blip mid-calibration won't interrupt an in-progress stream).
+- ⚠️ **Costs Blynk messages.** Unlike the MQTT path (which is free), each active flag
+  sends **1 message/second** (~60/min). That's why it's flag-gated and auto-expires —
+  only turn it on while you're actually calibrating. See the budget note below.
+
+> **App widget setup.** Add V12–V14 as **switches** and V15–V17 as **value displays**
+> (or a chart, to watch the curve as you wet the soil). Only wire up the channels you
+> actually have sensors on.
+
 ## Logging / serial verbosity (V40)
 
 The firmware's own serial logging is controlled at **runtime** by virtual pin **V40**
@@ -261,6 +299,21 @@ From the V10 handler, `scheduleEvent()`, and `onScheduleTrigger()` (the `Schedul
 | Next-run instants (after arm / V10 change) | DEBUG | `schedule: relay 0 next run: 2026-06-15 06:00:00` |
 | Blynk connected, NTP (re)started | DEBUG | `blynk: connected — NTP (re)started, syncing datastreams` |
 | Each device-datetime push (every 5 min) | DEBUG | `datetime: 2026-06-14 09:35:00 +07` |
+
+### What you actually see — calibration stream
+
+From the V12–V14 flag handlers and `calibrationEvent()`:
+
+| Event | Level | Example line |
+|-------|-------|--------------|
+| Flag turned on (stream starts) | INFO | `moisture cal: channel 0 stream ON (auto-off in 300s)` |
+| Flag turned off (by you) | INFO | `moisture cal: channel 0 stream OFF` |
+| Flag force-cleared after 5 min | WARN | `moisture cal: channel 0 auto-off after 300s timeout` |
+| Each value pushed (1/s while on) | DEBUG | `moisture cal: ch 0 = 2731` |
+
+So at **INFO** you get a clean on/off bracket per calibration session; raise to **DEBUG**
+to watch every raw sample in the serial log alongside the value pin in the app; and a
+**WARN** is your "you left it on" tell.
 
 > **Why these logs live in the `.ino`, not the headers.** `Moisture.h`, `Schedule.h`, and
 > `TimeManager.h` are deliberately free of any Arduino/Blynk dependency so their parsers
@@ -431,6 +484,7 @@ connected device costs nothing on its own.
 | Conflict-reject writes          | conflicting command sent         | 1 msg (rare)               |
 | Reconnect `syncVirtual` (V0–V7, V10, V11) | each Blynk reconnect   | ~10 msgs                   |
 | Inbound app commands            | each button/slider from phone    | 1 msg each                 |
+| **Calibration stream (V15–V17)** | 1/s *per active flag*, ≤5 min/flag | ≤300/flag/session, occasional |
 
 > ⚠️ **The uptime timer was the budget-killer.** At a 1 s interval it would send
 > **86,400 msgs/day** (~2.6M/month) — it alone would blow the monthly quota in

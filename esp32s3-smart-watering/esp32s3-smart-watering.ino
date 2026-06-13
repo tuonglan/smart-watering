@@ -15,6 +15,12 @@
 //   V9  Device datetime  (String "YYYY-MM-DD HH:MM:SS +07" local, every 5 min, read-only)
 //   V10 Schedule config  (String, app→device — see format below)
 //   V11 Moisture config  (String, app→device — see Moisture.h)
+//   V12 Cal flag ch0     (switch 0/1, app→device — stream sensor 0 to V15)
+//   V13 Cal flag ch1     (switch 0/1, app→device — stream sensor 1 to V16)
+//   V14 Cal flag ch2     (switch 0/1, app→device — stream sensor 2 to V17)
+//   V15 Cal value ch0    (int, read-only — raw ADC of sensor 0 while V12 is on)
+//   V16 Cal value ch1    (int, read-only — raw ADC of sensor 1 while V13 is on)
+//   V17 Cal value ch2    (int, read-only — raw ADC of sensor 2 while V14 is on)
 //   V40 Log level        (int 0-4, app→device — runtime serial verbosity)
 //       0=OFF 1=ERROR 2=WARN 3=INFO 4=DEBUG. Gates OUR logs only; the ESP32
 //       boot ROM messages and Blynk's own banner/output always print. See
@@ -40,7 +46,7 @@
 // ~1 s so short runs are not missed. See Moisture.h for the V11 string format and
 // monitoring/ for the broker + exporter stack.
 
-#define BLYNK_FIRMWARE_VERSION  "1.3.3"
+#define BLYNK_FIRMWARE_VERSION  "1.4.0"
 #define BLYNK_PRINT             Serial
 #define APP_DEBUG
 
@@ -86,7 +92,16 @@
 #define VPIN_DATETIME        V9
 #define VPIN_SCHEDULE_CFG    V10
 #define VPIN_MOISTURE_CFG    V11
+#define VPIN_MOIST_CAL0_FLAG V12
+#define VPIN_MOIST_CAL1_FLAG V13
+#define VPIN_MOIST_CAL2_FLAG V14
 #define VPIN_LOG_LEVEL       V40
+
+// Calibration stream: flag pin V12/V13/V14 (channel 0/1/2) -> value pin V15/V16/V17.
+// While a flag is on, calibrationEvent() pushes that channel's raw ADC to its value
+// pin once a second. Indexed by moisture channel (0..MOIST_MAX_PINS-1).
+static const uint8_t VPIN_MOIST_CAL_FLAG[MOIST_MAX_PINS] = { 12, 13, 14 };
+static const uint8_t VPIN_MOIST_CAL_VAL [MOIST_MAX_PINS] = { 15, 16, 17 };
 
 // ------------------------------------------------------------------ //
 //  Hardware pin for each relay                                         //
@@ -365,6 +380,15 @@ MqttPublisher   mqttPub;                     // pushes readings to the local bro
 uint32_t        last_publish_ms = 0;         // 0 = publish on the next tick
 bool            last_relay_state[2] = { false, false };  // edge-detect for out-of-cadence publishes
 
+// Calibration stream (V12-V14 flags -> V15-V17 values). Each flag, while on, streams
+// its channel's raw ADC to Blynk every calibration tick (1 Hz). A flag left on is
+// force-cleared after MOIST_CAL_MAX_ON_MS so a forgotten toggle can't drain the Blynk
+// message quota — long enough for a calibration session, short enough to be safe.
+// Flags default OFF at boot and are intentionally NOT in the reconnect sync list.
+static const uint32_t MOIST_CAL_MAX_ON_MS = 5UL * 60UL * 1000UL;  // 5 min auto-off
+bool            g_cal_flag[MOIST_MAX_PINS]     = { false, false, false };
+uint32_t        g_cal_on_since_ms[MOIST_MAX_PINS] = { 0, 0, 0 };
+
 // Scheduler asks us to start a relay; we honour the "skip if already running" rule.
 static void onScheduleTrigger(uint8_t relay_idx, void * /*ctx*/) {
   if (relay_idx >= 2) return;
@@ -418,6 +442,13 @@ BLYNK_CONNECTED() {
   Blynk.syncVirtual(VPIN_RELAY0_SWITCH, VPIN_RELAY0_RUNTIME, VPIN_RELAY0_TIMEON, VPIN_RELAY0_RUNMAX,
                     VPIN_RELAY1_SWITCH, VPIN_RELAY1_RUNTIME, VPIN_RELAY1_TIMEON, VPIN_RELAY1_RUNMAX,
                     VPIN_SCHEDULE_CFG, VPIN_MOISTURE_CFG, VPIN_LOG_LEVEL);
+
+  // Calibration flags are NOT synced down (device is the source of truth — they stay
+  // OFF across a reboot). Instead push our actual flag state UP so the app toggle can
+  // never disagree with the device: 0 after a reboot (clears a stale server "on"), or
+  // the live value if a calibration is in progress during a brief reconnect.
+  for (uint8_t ch = 0; ch < MOIST_MAX_PINS; ch++)
+    Blynk.virtualWrite(VPIN_MOIST_CAL_FLAG[ch], g_cal_flag[ch] ? 1 : 0);
 }
 
 // Runtime serial-log verbosity from the app (0=OFF 1=ERROR 2=WARN 3=INFO 4=DEBUG).
@@ -466,6 +497,26 @@ BLYNK_WRITE(VPIN_MOISTURE_CFG) {
     LOG_WARN(String("V11 rejected: '") + param.asStr() + "' -> INVALID FORMAT");
   }
 }
+
+// Toggle one calibration stream on/off. On the rising edge we stamp the start time so
+// calibrationEvent()'s safety timeout can force it off later. Shared by the three flag
+// handlers below.
+static void setCalFlag(uint8_t ch, bool on) {
+  if (ch >= MOIST_MAX_PINS) return;
+  g_cal_flag[ch] = on;
+  if (on) {
+    g_cal_on_since_ms[ch] = millis();
+    LOG_INFO(String("moisture cal: channel ") + ch + " stream ON (auto-off in " +
+             (MOIST_CAL_MAX_ON_MS / 1000UL) + "s)");
+  } else {
+    LOG_INFO(String("moisture cal: channel ") + ch + " stream OFF");
+  }
+}
+
+// Calibration flags from the app (V12/V13/V14 -> channel 0/1/2).
+BLYNK_WRITE(VPIN_MOIST_CAL0_FLAG) { setCalFlag(0, param.asInt() != 0); }
+BLYNK_WRITE(VPIN_MOIST_CAL1_FLAG) { setCalFlag(1, param.asInt() != 0); }
+BLYNK_WRITE(VPIN_MOIST_CAL2_FLAG) { setCalFlag(2, param.asInt() != 0); }
 
 // ------------------------------------------------------------------ //
 //  Uptime                                                              //
@@ -563,6 +614,31 @@ void moistureEvent() {
   if (ok) LOG_INFO("moisture: published");
 }
 
+// Calibration stream tick (1 Hz). For each channel whose flag (V12-V14) is on, push the
+// raw averaged ADC value to its value pin (V15-V17). Sampling is direct
+// (MoistureConfig::readRaw), independent of V11, so a sensor can be calibrated even
+// when it is not in the publish list. A flag left on is force-cleared — and the app
+// widget reset to 0 — after MOIST_CAL_MAX_ON_MS, protecting the Blynk quota. Sends
+// nothing while all flags are off.
+void calibrationEvent() {
+  uint32_t now = millis();
+  for (uint8_t ch = 0; ch < MOIST_MAX_PINS; ch++) {
+    if (!g_cal_flag[ch]) continue;
+
+    if ((now - g_cal_on_since_ms[ch]) >= MOIST_CAL_MAX_ON_MS) {
+      g_cal_flag[ch] = false;
+      Blynk.virtualWrite(VPIN_MOIST_CAL_FLAG[ch], 0);   // reflect the auto-off in the app
+      LOG_WARN(String("moisture cal: channel ") + ch + " auto-off after " +
+               (MOIST_CAL_MAX_ON_MS / 1000UL) + "s timeout");
+      continue;
+    }
+
+    int v = MoistureConfig::readRaw(ch);
+    Blynk.virtualWrite(VPIN_MOIST_CAL_VAL[ch], v);
+    DEBUG_PRINT(String("moisture cal: ch ") + ch + " = " + v);
+  }
+}
+
 // ------------------------------------------------------------------ //
 //  Arduino entry points                                                //
 // ------------------------------------------------------------------ //
@@ -583,6 +659,7 @@ void setup() {
   mainTimer.setInterval(300000L, datetimeEvent);  // V9 device datetime every 5 min
   mainTimer.setInterval(1000L,   scheduleEvent);  // schedule engine — 1 Hz, sends nothing unless it fires a relay
   mainTimer.setInterval(1000L,   moistureEvent);  // moisture publish — 1 Hz tick, self-paced to V11 interval
+  mainTimer.setInterval(1000L,   calibrationEvent);  // calibration stream (V12-V14 -> V15-V17), self-gated by flags
 
   // Edgent handles WiFi provisioning, auth token storage, OTA, and
   // the factory-reset button (GPIO0 held 5 s).
