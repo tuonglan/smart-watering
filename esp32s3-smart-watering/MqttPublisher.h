@@ -117,8 +117,13 @@ private:
       // Log a connect failure once per down-streak (with the PubSubClient rc) so a
       // dead broker doesn't spam one WARN per interval. rc -4=timeout, -2=connect
       // failed, 5=not authorized, etc. (see PubSubClient state() codes).
-      if (!_downLogged)
+      if (!_downLogged) {
         LOG_WARN(String("mqtt: connect failed rc=") + _mqtt.state() + " (" + _host + ":" + _port + ")");
+      } else {
+        // Already warned once this streak. At DEBUG, still breadcrumb each retry so a
+        // long outage isn't total silence while you're actively debugging the broker.
+        DEBUG_PRINT(String("mqtt: retry failed rc=") + _mqtt.state() + " (" + _host + ":" + _port + ")");
+      }
       _online     = false;
       _downLogged = true;
     }

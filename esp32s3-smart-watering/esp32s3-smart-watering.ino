@@ -40,7 +40,7 @@
 // ~1 s so short runs are not missed. See Moisture.h for the V11 string format and
 // monitoring/ for the broker + exporter stack.
 
-#define BLYNK_FIRMWARE_VERSION  "1.3.2"
+#define BLYNK_FIRMWARE_VERSION  "1.3.3"
 #define BLYNK_PRINT             Serial
 #define APP_DEBUG
 
