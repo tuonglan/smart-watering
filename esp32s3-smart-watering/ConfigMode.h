@@ -301,7 +301,7 @@ void enterConfigMode()
       connectNetRetries = connectBlynkRetries = 1;
       BlynkState::set(MODE_SWITCH_TO_STA);
     } else {
-      DEBUG_PRINT("Configuration invalid");
+      LOG_WARN("Configuration invalid");
       content = R"json({"status":"error","msg":"Configuration invalid"})json";
       server.send(500, "application/json", content);
     }
@@ -427,7 +427,7 @@ void enterConnectNet() {
                     configStore.staticDNS,
                     configStore.staticDNS2)
     ) {
-      DEBUG_PRINT("Failed to configure Static IP");
+      LOG_WARN("Failed to configure Static IP");
       config_set_last_error(BLYNK_PROV_ERR_CONFIG);
       BlynkState::set(MODE_ERROR);
       return;
@@ -486,7 +486,7 @@ void enterConnectCloud() {
   }
 
   if (millis() > timeoutMs) {
-    DEBUG_PRINT("Timeout");
+    LOG_WARN("Timeout");
   }
 
   if (Blynk.isTokenInvalid()) {
@@ -536,7 +536,7 @@ void enterError() {
       return;
     }
   }
-  DEBUG_PRINT("Restarting after error.");
+  LOG_ERROR("Restarting after error.");
   delay(10);
 
   restartMCU();

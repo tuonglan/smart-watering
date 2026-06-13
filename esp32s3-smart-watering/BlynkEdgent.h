@@ -124,7 +124,10 @@ public:
     if (!String(BLYNK_TEMPLATE_ID).startsWith("TMPL") ||
         !strlen(BLYNK_TEMPLATE_NAME)
     ) {
-      DEBUG_PRINT("Invalid configuration of TEMPLATE_ID / TEMPLATE_NAME");
+      // Fatal, unrecoverable hang and it happens at boot before V40 is synced —
+      // print ungated (BLYNK_LOG1, like the framework) so it's never swallowed by
+      // a low log level, otherwise the board would brick silently.
+      BLYNK_LOG1("Invalid configuration of TEMPLATE_ID / TEMPLATE_NAME");
       while (true) { delay(100); }
     }
   }

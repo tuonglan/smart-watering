@@ -63,10 +63,56 @@
 
 #define BLYNK_NO_DEFAULT_BANNER
 
+// ------------------------------------------------------------------ //
+//  Application logging — runtime severity levels (V40)                 //
+// ------------------------------------------------------------------ //
+//  APP_DEBUG is the compile-time master kill-switch: if it is NOT
+//  defined, every LOG_* macro below compiles to nothing (zero flash,
+//  zero CPU) for a production build, and V40 does nothing.
+//
+//  When APP_DEBUG IS defined, g_logLevel (driven by virtual pin V40,
+//  default 0/OFF at boot, synced from the app on connect) selects how
+//  much OF OUR OWN application logging is emitted. It is a threshold:
+//  a line prints when g_logLevel >= the line's severity.
+//
+//      V40  g_logLevel        emits (cumulative)
+//      ---  ----------------  -----------------------------
+//       0   LOG_LEVEL_OFF     nothing from our code
+//       1   LOG_LEVEL_ERROR   + LOG_ERROR
+//       2   LOG_LEVEL_WARN    + LOG_WARN
+//       3   LOG_LEVEL_INFO    + LOG_INFO
+//       4   LOG_LEVEL_DEBUG   + DEBUG_PRINT (everything, verbose)
+//
+//  This ONLY gates our logs. The ESP32 ROM boot messages and the Blynk
+//  library's own output (banner, state) go through their own paths and
+//  always print, regardless of V40.
+#define LOG_LEVEL_OFF    0
+#define LOG_LEVEL_ERROR  1
+#define LOG_LEVEL_WARN   2
+#define LOG_LEVEL_INFO   3
+#define LOG_LEVEL_DEBUG  4
+
 #if defined(APP_DEBUG)
-  #define DEBUG_PRINT(...)  BLYNK_LOG1(__VA_ARGS__)
-  #define DEBUG_PRINTF(...) BLYNK_LOG(__VA_ARGS__)
+  extern uint8_t g_logLevel;   // defined in the .ino, set at runtime via V40
+
+  // String-style (single arg, e.g. String("x ") + y) -> BLYNK_LOG1
+  #define LOG_ERROR(...)    do { if (g_logLevel >= LOG_LEVEL_ERROR) BLYNK_LOG1(__VA_ARGS__); } while (0)
+  #define LOG_WARN(...)     do { if (g_logLevel >= LOG_LEVEL_WARN)  BLYNK_LOG1(__VA_ARGS__); } while (0)
+  #define LOG_INFO(...)     do { if (g_logLevel >= LOG_LEVEL_INFO)  BLYNK_LOG1(__VA_ARGS__); } while (0)
+  #define DEBUG_PRINT(...)  do { if (g_logLevel >= LOG_LEVEL_DEBUG) BLYNK_LOG1(__VA_ARGS__); } while (0)
+
+  // printf-style (format + args) -> BLYNK_LOG
+  #define LOG_ERRORF(...)   do { if (g_logLevel >= LOG_LEVEL_ERROR) BLYNK_LOG(__VA_ARGS__); } while (0)
+  #define LOG_WARNF(...)    do { if (g_logLevel >= LOG_LEVEL_WARN)  BLYNK_LOG(__VA_ARGS__); } while (0)
+  #define LOG_INFOF(...)    do { if (g_logLevel >= LOG_LEVEL_INFO)  BLYNK_LOG(__VA_ARGS__); } while (0)
+  #define DEBUG_PRINTF(...) do { if (g_logLevel >= LOG_LEVEL_DEBUG) BLYNK_LOG(__VA_ARGS__); } while (0)
 #else
+  #define LOG_ERROR(...)
+  #define LOG_WARN(...)
+  #define LOG_INFO(...)
   #define DEBUG_PRINT(...)
+  #define LOG_ERRORF(...)
+  #define LOG_WARNF(...)
+  #define LOG_INFOF(...)
   #define DEBUG_PRINTF(...)
 #endif

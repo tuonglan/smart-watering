@@ -34,20 +34,20 @@ void enterOTA() {
 
   int httpCode = http.GET();
   if (httpCode != HTTP_CODE_OK) {
-    DEBUG_PRINT("HTTP response should be 200");
+    LOG_ERROR("HTTP response should be 200");
     BlynkState::set(MODE_ERROR);
     return;
   }
   int contentLength = http.getSize();
   if (contentLength <= 0) {
-    DEBUG_PRINT("Content-Length not defined");
+    LOG_ERROR("Content-Length not defined");
     BlynkState::set(MODE_ERROR);
     return;
   }
 
   bool canBegin = Update.begin(contentLength);
   if (!canBegin) {
-    DEBUG_PRINT("Not enough space to begin OTA");
+    LOG_ERROR("Not enough space to begin OTA");
     BlynkState::set(MODE_ERROR);
     return;
   }
@@ -68,24 +68,24 @@ void enterOTA() {
   Client& client = http.getStream();
   int written = Update.writeStream(client);
   if (written != contentLength) {
-    DEBUG_PRINT(String("OTA written ") + written + " / " + contentLength + " bytes");
+    LOG_ERROR(String("OTA written ") + written + " / " + contentLength + " bytes");
     BlynkState::set(MODE_ERROR);
     return;
   }
 
   if (!Update.end()) {
-    DEBUG_PRINT("Error #" + String(Update.getError()));
+    LOG_ERROR("Error #" + String(Update.getError()));
     BlynkState::set(MODE_ERROR);
     return;
   }
 
   if (!Update.isFinished()) {
-    DEBUG_PRINT("Update failed.");
+    LOG_ERROR("Update failed.");
     BlynkState::set(MODE_ERROR);
     return;
   }
 
-  DEBUG_PRINT("=== Update successfully completed. Rebooting.");
+  LOG_INFO("=== Update successfully completed. Rebooting.");
   restartMCU();
 }
 

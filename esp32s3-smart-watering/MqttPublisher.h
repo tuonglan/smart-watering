@@ -35,6 +35,8 @@ public:
     _mqtt.setSocketTimeout(2);        // s  — cap the MQTT CONNACK wait after TCP connects
     _mqtt.setKeepAlive(90);
     _configured = false;
+    _online     = false;
+    _downLogged = false;
   }
 
   // (Re)point at a broker + device. Cheap; call whenever V11 changes. Disconnects an
@@ -49,6 +51,9 @@ public:
     _mqtt.setServer(_host, _port);
     if (_mqtt.connected()) _mqtt.disconnect();
     _configured = true;
+    _online     = false;   // force a fresh connect (and a connect log) on the next publish
+    _downLogged = false;
+    DEBUG_PRINT(String("mqtt: target ") + _topic + " @ " + _host + ":" + _port);
   }
 
   // Service the MQTT keepalive/incoming. Call from loop().
@@ -60,8 +65,9 @@ public:
   // true only if the broker accepted the publish.
   bool publish(const int *vals, const bool *chEnabled, uint8_t count,
                const bool *relayOn, const bool *relayEnabled, uint8_t relayCount) {
-    if (!_configured || WiFi.status() != WL_CONNECTED) return false;
-    if (!_ensureConnected()) return false;
+    if (!_configured) { DEBUG_PRINT("mqtt: publish skipped (no V11 target yet)"); return false; }
+    if (WiFi.status() != WL_CONNECTED) { DEBUG_PRINT("mqtt: publish skipped (WiFi down)"); return false; }
+    if (!_ensureConnected()) return false;   // _ensureConnected() logs the reason (WARN)
 
     char payload[128];
     int  n = 0;
@@ -81,7 +87,10 @@ public:
     }
     snprintf(payload + n, sizeof(payload) - n, "}");
 
-    return _mqtt.publish(_topic, payload);
+    bool ok = _mqtt.publish(_topic, payload);
+    if (ok) DEBUG_PRINT(String("mqtt: -> ") + _topic + " " + payload);
+    else    LOG_WARN(String("mqtt: broker rejected publish to ") + _topic);
+    return ok;
   }
 
   bool connected() { return _mqtt.connected(); }
@@ -98,7 +107,21 @@ private:
 
     // connect(id, user, pass, willTopic, willQoS, willRetain, willMsg)
     bool ok = _mqtt.connect(cid, NULL, NULL, _statusTopic, 0, true, "offline");
-    if (ok) _mqtt.publish(_statusTopic, "online", true);
+    if (ok) {
+      _mqtt.publish(_statusTopic, "online", true);
+      // Edge-triggered: only log the transition into "connected", not every publish.
+      if (!_online) LOG_INFO(String("mqtt: connected to ") + _host + ":" + _port + " as " + cid);
+      _online     = true;
+      _downLogged = false;
+    } else {
+      // Log a connect failure once per down-streak (with the PubSubClient rc) so a
+      // dead broker doesn't spam one WARN per interval. rc -4=timeout, -2=connect
+      // failed, 5=not authorized, etc. (see PubSubClient state() codes).
+      if (!_downLogged)
+        LOG_WARN(String("mqtt: connect failed rc=") + _mqtt.state() + " (" + _host + ":" + _port + ")");
+      _online     = false;
+      _downLogged = true;
+    }
     return ok;
   }
 
@@ -111,4 +134,6 @@ private:
   char     _statusTopic[MOIST_DEV_LEN + 24];
   uint16_t _port       = MOIST_DEFAULT_PORT;
   bool     _configured = false;
+  bool     _online     = false;   // last observed broker state — edge-trigger connect logs
+  bool     _downLogged = false;   // a connect-failure WARN already emitted this down-streak
 };

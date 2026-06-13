@@ -258,3 +258,24 @@ for future use; today liveness is handled by the exporter's `cache.timeout`.
 > **Raw values only.** The device publishes raw 12-bit ADC (0–4095); raw→% calibration
 > is done downstream (Grafana / Prometheus rules) so re-calibrating never means
 > re-flashing.
+
+## 11. Serial logging / verbosity (V40)
+
+Our own serial logging is a **runtime severity threshold** driven by virtual pin **V40**
+(Integer 0–4). A line prints when V40 ≥ its severity:
+
+| V40 | Level | Emits (cumulative)                                  |
+|-----|-------|-----------------------------------------------------|
+| 0   | OFF   | nothing from our code — **boot default**            |
+| 1   | ERROR | + errors (OTA/config failures, fatal restart)       |
+| 2   | WARN  | + warnings (publish failed, timeout, invalid config)|
+| 3   | INFO  | + normal operation (moisture published, OTA done)   |
+| 4   | DEBUG | + everything (WiFi, provisioning, state machine)    |
+
+- **Gates our logs only.** ESP32 ROM boot lines (`rst:…`, `load:…`, `entry…`) and the
+  Blynk library's own banner/state output use their own paths and always print, even at 0.
+- Synced on every connect (`syncVirtual(V40)`), so it survives reboots once the app holds it.
+- **Compile-time master switch:** `#define APP_DEBUG` in the `.ino`. Removed → the whole
+  `LOG_*` family compiles to nothing and V40 is inert (zero flash/CPU). Macros: `Settings.h`.
+- The level test is one integer compare; cost is only the lines you actually emit. Keep
+  verbose logs on events/timers, not in a per-`loop()` hot path, and CPU impact is nil.

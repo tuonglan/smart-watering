@@ -111,7 +111,7 @@ void config_load()
       configStore = configDefault;
     }
   } else {
-    DEBUG_PRINT("Config read failed");
+    LOG_ERROR("Config read failed");
   }
 }
 
@@ -123,7 +123,7 @@ bool config_save()
     DEBUG_PRINT("Configuration stored to flash");
     return true;
   } else {
-    DEBUG_PRINT("Config write failed");
+    LOG_ERROR("Config write failed");
     return false;
   }
 }
@@ -136,7 +136,7 @@ bool config_init()
 
 void enterResetConfig()
 {
-  DEBUG_PRINT("Resetting configuration!");
+  LOG_WARN("Resetting configuration!");
   configStore = configDefault;
   config_save();
   BlynkState::set(MODE_WAIT_CONFIG);

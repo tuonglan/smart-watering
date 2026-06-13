@@ -28,9 +28,10 @@ auth token are provisioned at runtime via the Blynk app (no hardcoded secrets).
 | V9  | Device time    | **String**      | `YYYY-MM-DD HH:MM:SS +07` local, read-only, every 5 min |
 | V10 | Schedule       | **String**      | start-time config (see Scheduling), app→device |
 | V11 | Moisture cfg   | **String**      | sensor + MQTT config (see Soil-moisture), app→device |
+| V40 | Log level      | Integer 0–4     | serial verbosity (see Logging), app→device |
 
 > **V8, V9, V10, and V11 must be String datastreams** in the Blynk console (not
-> Integer), or the text is dropped.
+> Integer), or the text is dropped. **V40 is an Integer** datastream (range 0–4).
 
 > The `.ino` defines readable `#define VPIN_*` aliases for every pin above (e.g.
 > `VPIN_MOISTURE_CFG` → V11); the table here is the canonical reference.
@@ -187,6 +188,85 @@ and retried on the next interval — it recovers automatically when the broker r
 PubSubClient does not reconnect on its own; the per-interval attempt is what heals it.
 The brief stall never affects pump safety: the hardware `esp_timer` failsafe runs on
 its own task, independent of `loop()`.
+
+## Logging / serial verbosity (V40)
+
+The firmware's own serial logging is controlled at **runtime** by virtual pin **V40**
+(Integer, 0–4). It's a severity threshold — a line prints when the level is at or above
+its severity:
+
+| V40 | Level | Emits (cumulative)            |
+|-----|-------|-------------------------------|
+| 0   | OFF   | nothing from our code (default at boot) |
+| 1   | ERROR | + errors (OTA/config failures, fatal paths) |
+| 2   | WARN  | + warnings (publish failed, timeouts, invalid config) |
+| 3   | INFO  | + normal operation (moisture published, OTA done) |
+| 4   | DEBUG | + everything (verbose: WiFi, provisioning, state) |
+
+Set it live from the app to watch detail, then drop it back to 0 for a quiet log.
+The value is synced on every reconnect (`syncVirtual(V40)`), so it survives a reboot
+once the app holds it.
+
+**This gates our logs only.** The ESP32 ROM boot messages (`rst:…`, `load:…`, `entry…`)
+and the Blynk library's own output (the banner, connection state) go through their own
+paths and **always print**, regardless of V40 — including at level 0. So a fresh boot at
+the default still shows the banner; you just won't see our chatter until you raise V40.
+
+> **Compile-time master switch.** `#define APP_DEBUG` in the `.ino` enables the whole
+> `LOG_*` family. Remove it for a production build and *all* of our logging (and V40's
+> effect) is compiled out entirely — zero flash, zero CPU. The macros live in `Settings.h`.
+
+> **Cost.** The level check is a single integer compare (free). You only pay for lines
+> actually emitted, and only at the rate you emit them — so keep verbose logging on
+> events/timers, never in a per-`loop()` hot path, and there's no meaningful CPU impact.
+
+### What you actually see — metrics (MQTT) path
+
+This is the most heavily instrumented path, since it's the usual "why is no data
+arriving?" suspect. Logs come from `MqttPublisher.h` and `moistureEvent()`:
+
+| Event | Level | Example line |
+|-------|-------|--------------|
+| V11 config applied | INFO | `V11 applied: 2 ch, 1 relay -> garden-node1 @ 192.168.1.50:1883 every 60s` |
+| V11 rejected | WARN | `V11 rejected: 's9;...' -> INVALID FORMAT` |
+| V11 unset/invalid at a publish tick | WARN¹ | `moisture: V11 not set or invalid — not publishing` |
+| Broker connected / reconnected | INFO¹ | `mqtt: connected to 192.168.1.50:1883 as garden-node1-3f9a2c01` |
+| Broker connect failed | WARN¹ | `mqtt: connect failed rc=-4 (192.168.1.50:1883)` |
+| Broker rejected a publish | WARN | `mqtt: broker rejected publish to watering/garden-node1/moisture` |
+| Publish succeeded (summary) | INFO | `moisture: published` |
+| Publish succeeded (full payload) | DEBUG | `mqtt: -> watering/garden-node1/moisture {"s0":2731,"r0":0}` |
+| Publish skipped (WiFi down / no target) | DEBUG | `mqtt: publish skipped (WiFi down)` |
+
+¹ **Edge-triggered:** logged once on the transition, not repeated every interval — a dead
+broker yields one WARN when it drops and one INFO when it recovers, not one per tick.
+
+The `rc=` on a failed connect is the PubSubClient `state()` code — the fastest way to tell
+*why* it won't connect: `-4` timeout, `-3` connection lost, `-2` connect failed (bad
+host/port/unreachable), `-1` disconnected, `5` not authorized. So for the classic "no
+`watering` topic in MQTT Explorer" problem: at **WARN** you see the connect failures + rc;
+at **DEBUG** you see the exact JSON being sent, to compare against the broker.
+
+### What you actually see — schedule + clock
+
+From the V10 handler, `scheduleEvent()`, and `onScheduleTrigger()` (the `Schedule.h` /
+`TimeManager.h` headers stay logging-free by design — see note below):
+
+| Event | Level | Example line |
+|-------|-------|--------------|
+| First NTP sync (clock becomes valid) | INFO | `NTP synced: 2026-06-14 09:31:02 +07 — schedules armed` |
+| V10 schedule applied | INFO | `V10 applied: *;06:00\|*;06:05` |
+| V10 had an invalid side | WARN | `V10 had an invalid side, rewritten to: *;06:00\|INVALID FORMAT` |
+| Relay started by the scheduler | INFO | `schedule: relay 0 started by schedule` |
+| Trigger skipped (relay already running) | DEBUG | `schedule: relay 0 trigger skipped (already running)` |
+| Next-run instants (after arm / V10 change) | DEBUG | `schedule: relay 0 next run: 2026-06-15 06:00:00` |
+| Blynk connected, NTP (re)started | DEBUG | `blynk: connected — NTP (re)started, syncing datastreams` |
+| Each device-datetime push (every 5 min) | DEBUG | `datetime: 2026-06-14 09:35:00 +07` |
+
+> **Why these logs live in the `.ino`, not the headers.** `Moisture.h`, `Schedule.h`, and
+> `TimeManager.h` are deliberately free of any Arduino/Blynk dependency so their parsers
+> can be host-compiled and unit-tested with plain `g++`. Adding `LOG_*` (which expand to
+> Blynk logging) inside them would break that, so their logging is done at the call sites
+> in the `.ino`. `MqttPublisher.h` already depends on WiFi/PubSubClient, so it logs inline.
 
 ## Arduino IDE settings (ESP32-S3 N16R8)
 

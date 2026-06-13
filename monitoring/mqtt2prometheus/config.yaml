@@ -32,23 +32,27 @@ json_parsing:
 # A node enables ids explicitly in V11, so any sN it doesn't select is simply absent
 # from the payload and that series never appears (same for the relays below).
 metrics:
+  # NOTE: every entry that shares a prom_name MUST use the identical `help`
+  # string (Prometheus rejects same-name descriptors with differing help, and
+  # mqtt2prometheus panics at startup if they differ). The per-channel info
+  # (GPIO mapping) lives in the `channel` const_label, not in help.
   - prom_name: soil_moisture_raw
     mqtt_name: s0
-    help: "Raw ADC moisture reading (0-4095). channel 0 / GPIO4"
+    help: "Raw ADC moisture reading (0-4095), per channel. s0->GPIO4, s1->GPIO5, s2->GPIO6"
     type: gauge
     const_labels:
       channel: "0"
 
   - prom_name: soil_moisture_raw
     mqtt_name: s1
-    help: "Raw ADC moisture reading (0-4095). channel 1 / GPIO5"
+    help: "Raw ADC moisture reading (0-4095), per channel. s0->GPIO4, s1->GPIO5, s2->GPIO6"
     type: gauge
     const_labels:
       channel: "1"
 
   - prom_name: soil_moisture_raw
     mqtt_name: s2
-    help: "Raw ADC moisture reading (0-4095). channel 2 / GPIO6"
+    help: "Raw ADC moisture reading (0-4095), per channel. s0->GPIO4, s1->GPIO5, s2->GPIO6"
     type: gauge
     const_labels:
       channel: "2"
@@ -58,14 +62,14 @@ metrics:
   # are captured; a relay not selected in V11 is simply absent.
   - prom_name: relay_on
     mqtt_name: r0
-    help: "Relay/pump state (1=on, 0=off). relay 0 / GPIO38"
+    help: "Relay/pump state (1=on, 0=off), per relay. r0->GPIO38, r1->GPIO39"
     type: gauge
     const_labels:
       relay: "0"
 
   - prom_name: relay_on
     mqtt_name: r1
-    help: "Relay/pump state (1=on, 0=off). relay 1 / GPIO39"
+    help: "Relay/pump state (1=on, 0=off), per relay. r0->GPIO38, r1->GPIO39"
     type: gauge
     const_labels:
       relay: "1"

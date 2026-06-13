@@ -15,6 +15,10 @@
 //   V9  Device datetime  (String "YYYY-MM-DD HH:MM:SS +07" local, every 5 min, read-only)
 //   V10 Schedule config  (String, app→device — see format below)
 //   V11 Moisture config  (String, app→device — see Moisture.h)
+//   V40 Log level        (int 0-4, app→device — runtime serial verbosity)
+//       0=OFF 1=ERROR 2=WARN 3=INFO 4=DEBUG. Gates OUR logs only; the ESP32
+//       boot ROM messages and Blynk's own banner/output always print. See
+//       Settings.h for the LOG_* macros. Default 0 at boot; synced from app.
 //
 // Relay index = vpin / 4 , pin offset = vpin % 4
 //
@@ -36,7 +40,7 @@
 // ~1 s so short runs are not missed. See Moisture.h for the V11 string format and
 // monitoring/ for the broker + exporter stack.
 
-#define BLYNK_FIRMWARE_VERSION  "1.3.1"
+#define BLYNK_FIRMWARE_VERSION  "1.3.2"
 #define BLYNK_PRINT             Serial
 #define APP_DEBUG
 
@@ -82,6 +86,7 @@
 #define VPIN_DATETIME        V9
 #define VPIN_SCHEDULE_CFG    V10
 #define VPIN_MOISTURE_CFG    V11
+#define VPIN_LOG_LEVEL       V40
 
 // ------------------------------------------------------------------ //
 //  Hardware pin for each relay                                         //
@@ -345,6 +350,12 @@ RelayController relays[2];
 BlynkTimer      mainTimer;
 uint32_t        boot_ms;
 
+// Runtime serial-log verbosity, driven by V40 (see Settings.h). Boot default
+// 0/OFF: a quiet boot showing only the framework banner + any promoted errors,
+// until the app syncs V40 (or the user raises it live). Referenced by the LOG_*
+// macros when APP_DEBUG is defined; harmless if it isn't.
+uint8_t         g_logLevel = LOG_LEVEL_OFF;
+
 TimeManager     timeMgr;
 ScheduleManager schedMgr;
 bool            g_time_was_valid = false;   // rising-edge latch for first NTP sync
@@ -356,9 +367,33 @@ bool            last_relay_state[2] = { false, false };  // edge-detect for out-
 
 // Scheduler asks us to start a relay; we honour the "skip if already running" rule.
 static void onScheduleTrigger(uint8_t relay_idx, void * /*ctx*/) {
-  if (relay_idx < 2 && !relays[relay_idx].isOn()) {
+  if (relay_idx >= 2) return;
+  if (!relays[relay_idx].isOn()) {
     relays[relay_idx].startScheduled();
+    LOG_INFO(String("schedule: relay ") + relay_idx + " started by schedule");
+  } else {
+    DEBUG_PRINT(String("schedule: relay ") + relay_idx + " trigger skipped (already running)");
   }
+}
+
+// DEBUG dump of each relay's next scheduled firing (local time), e.g. after a V10
+// change or the first NTP sync. The work is skipped unless we're actually at DEBUG.
+static void logNextRuns() {
+#ifdef APP_DEBUG
+  if (g_logLevel < LOG_LEVEL_DEBUG) return;
+  for (uint8_t r = 0; r < 2; r++) {
+    time_t nr = schedMgr.nextRun(r);
+    if (nr == 0) {
+      DEBUG_PRINT(String("schedule: relay ") + r + " next run: (disabled)");
+      continue;
+    }
+    struct tm lt;
+    localtime_r(&nr, &lt);
+    char when[32];
+    strftime(when, sizeof(when), "%Y-%m-%d %H:%M:%S", &lt);
+    DEBUG_PRINT(String("schedule: relay ") + r + " next run: " + when);
+  }
+#endif
 }
 
 // ------------------------------------------------------------------ //
@@ -377,11 +412,24 @@ BLYNK_WRITE_DEFAULT() {
 BLYNK_CONNECTED() {
   // WiFi is up here — (re)start NTP. Idempotent.
   timeMgr.begin();
+  DEBUG_PRINT("blynk: connected — NTP (re)started, syncing datastreams");
   // V10 restores the stored schedule, V11 the moisture/MQTT config (each triggers
   // its BLYNK_WRITE below).
   Blynk.syncVirtual(VPIN_RELAY0_SWITCH, VPIN_RELAY0_RUNTIME, VPIN_RELAY0_TIMEON, VPIN_RELAY0_RUNMAX,
                     VPIN_RELAY1_SWITCH, VPIN_RELAY1_RUNTIME, VPIN_RELAY1_TIMEON, VPIN_RELAY1_RUNMAX,
-                    VPIN_SCHEDULE_CFG, VPIN_MOISTURE_CFG);
+                    VPIN_SCHEDULE_CFG, VPIN_MOISTURE_CFG, VPIN_LOG_LEVEL);
+}
+
+// Runtime serial-log verbosity from the app (0=OFF 1=ERROR 2=WARN 3=INFO 4=DEBUG).
+// Clamped to range. The confirmation uses BLYNK_LOG1 directly so it prints even at
+// level 0 (it's framework output, not gated by g_logLevel) — you always get feedback
+// that the level changed.
+BLYNK_WRITE(VPIN_LOG_LEVEL) {
+  int v = param.asInt();
+  if (v < LOG_LEVEL_OFF)   v = LOG_LEVEL_OFF;
+  if (v > LOG_LEVEL_DEBUG) v = LOG_LEVEL_DEBUG;
+  g_logLevel = (uint8_t)v;
+  BLYNK_LOG1(String("log level -> ") + g_logLevel);
 }
 
 // Schedule config from the app. Parse, (re)arm, and echo "INVALID FORMAT" back for
@@ -392,7 +440,11 @@ BLYNK_WRITE(VPIN_SCHEDULE_CFG) {
                                 timeMgr.now(), timeMgr.valid());
   if (rewrite) {
     Blynk.virtualWrite(VPIN_SCHEDULE_CFG, echo);
+    LOG_WARN(String("V10 had an invalid side, rewritten to: ") + echo);
+  } else {
+    LOG_INFO(String("V10 applied: ") + param.asStr());
   }
+  logNextRuns();   // DEBUG: show the (re)armed next-run instants
 }
 
 // Moisture + MQTT config from the app. Parse, echo "INVALID FORMAT" on a bad string,
@@ -407,6 +459,11 @@ BLYNK_WRITE(VPIN_MOISTURE_CFG) {
   if (moistCfg.valid()) {
     mqttPub.configure(moistCfg.host(), moistCfg.port(), moistCfg.device());
     last_publish_ms = 0;
+    LOG_INFO(String("V11 applied: ") + moistCfg.channelCount() + " ch, " +
+             moistCfg.relayCount() + " relay -> " + moistCfg.device() + " @ " +
+             moistCfg.host() + ":" + moistCfg.port() + " every " + moistCfg.intervalS() + "s");
+  } else {
+    LOG_WARN(String("V11 rejected: '") + param.asStr() + "' -> INVALID FORMAT");
   }
 }
 
@@ -439,6 +496,7 @@ void datetimeEvent() {
   char buf[32];
   timeMgr.formatLocal(buf, sizeof(buf));   // writes "SYNCING..." when not yet valid
   Blynk.virtualWrite(VPIN_DATETIME, buf);
+  DEBUG_PRINT(String("datetime: ") + buf);
 }
 
 // Per-second schedule engine. Gated on a valid clock; arms next-run epochs on the
@@ -450,6 +508,10 @@ void scheduleEvent() {
   if (!g_time_was_valid) {
     g_time_was_valid = true;
     schedMgr.onTimeValid(now);   // compute next-run for both relays now that we know the time
+    char buf[32];
+    timeMgr.formatLocal(buf, sizeof(buf));
+    LOG_INFO(String("NTP synced: ") + buf + " — schedules armed");
+    logNextRuns();
   }
   schedMgr.evaluate(now);
 }
@@ -461,7 +523,17 @@ void scheduleEvent() {
 // tacks on each enabled relay state, and pushes one MQTT message; only the ids
 // selected in V11 are published. A failed publish just retries next tick.
 void moistureEvent() {
-  if (!moistCfg.valid()) return;
+  // Edge-logged so the "nothing is publishing and I don't know why" case is visible
+  // once (not 1×/s) when V11 is unset/invalid. Cleared when a valid config arrives.
+  static bool warnedInvalid = false;
+  if (!moistCfg.valid()) {
+    if (!warnedInvalid) {
+      LOG_WARN("moisture: V11 not set or invalid — not publishing");
+      warnedInvalid = true;
+    }
+    return;
+  }
+  warnedInvalid = false;
 
   bool relayOn[MOIST_RELAYS]      = { relays[0].isOn(), relays[1].isOn() };
   bool relayEnabled[MOIST_RELAYS] = { moistCfg.relayEnabled(0), moistCfg.relayEnabled(1) };
@@ -486,7 +558,9 @@ void moistureEvent() {
 
   bool ok = mqttPub.publish(vals, chEnabled, MOIST_MAX_PINS,
                             relayOn, relayEnabled, MOIST_RELAYS);
-  DEBUG_PRINT(ok ? "moisture: published" : "moisture: publish failed");
+  // Success summary here; the specific failure reason (WiFi down / broker
+  // unreachable+rc / broker rejected) is logged inside MqttPublisher.
+  if (ok) LOG_INFO("moisture: published");
 }
 
 // ------------------------------------------------------------------ //
