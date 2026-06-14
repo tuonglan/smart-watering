@@ -4,7 +4,7 @@ Blynk Edgent firmware for a 2-relay watering controller. WiFi credentials and th
 auth token are provisioned at runtime via the Blynk app (no hardcoded secrets).
 
 - **Board:** UICPAL ESP32-S3-CAM N16R8 (ESP32-S3-WROOM-1, 16 MB flash / 8 MB OPI PSRAM — see `ESP32S3.md`)
-- **Relays:** GPIO38 (relay 0), GPIO39 (relay 1) — HIGH = on
+- **Relays:** GPIO38 (relay 0), GPIO39 (relay 1) — opto-isolated **active-low** modules (IN LOW = on, IN HIGH/floating = off; polarity set by `RELAY_ACTIVE_HIGH` in `RelayController.h`)
 - **Status LED:** onboard WS2812 RGB on GPIO48 (requires the **Adafruit NeoPixel** library)
 - **Template:** `Smart Watering` (`TMPL6yGZY2olP`)
 - **Firmware version:** bump `BLYNK_FIRMWARE_VERSION` before every OTA ship
@@ -73,11 +73,17 @@ Without all three, the sketch won't compile.
 
 ## Safety design
 
-The pin is **never** HIGH longer than `MAX_RUNNING_TIME_S` (300 s). Three layers:
+The relay is **never** energized longer than `MAX_RUNNING_TIME_S` (300 s). Three layers:
 1. `BlynkTimer` countdown (`_cb_stop`) — normal stop.
 2. Software backstop in `run()` — catches a missed timer.
-3. Hardware `esp_timer` failsafe (priority-22 task) — forces the pin LOW even if
+3. Hardware `esp_timer` failsafe (priority-22 task) — forces the relay OFF even if
    `loop()` is blocked during a WiFi/Blynk reconnect.
+
+Relay polarity is active-low (see pin list above). Every pin write goes through
+`RELAY_ON_LEVEL` / `RELAY_OFF_LEVEL`, and `begin()` drives the OFF level before
+switching the pin to `OUTPUT`, so the pump stays off through the boot window (the
+pins come up high-impedance, and an active-low opto input can only energize by
+actively sinking current — which a floating pin cannot do).
 
 ## Scheduling (timed automatic watering)
 
@@ -503,6 +509,66 @@ and reboots into the new firmware. If the new image fails to connect, Blynk
 - **No-OTA partition scheme** → re-flash once via USB with an OTA scheme.
 - **Device offline** → the update queues until it reconnects; confirm it's online.
 - **Wrong `.bin`** → use the plain `*.ino.bin`, not merged/bootloader/partitions.
+
+## USB firmware update without losing config (OTA alternative)
+
+No OTA quota left? You can re-flash over **USB** and still **keep your WiFi
+credentials + Blynk auth token** — a normal sketch upload writes only the app
+partition, exactly like OTA does. The config lives in the **NVS partition**
+(`ConfigStore.h` saves it via `Preferences`, namespace `"blynk"`), and a plain
+upload never touches it. From the partition table:
+
+```
+nvs,   data, nvs,   0x9000,  0x5000      ← WiFi SSID/pass + Blynk token (untouched)
+app0,  app,  ota_0, 0x10000, 0x300000    ← firmware (this is all an upload rewrites)
+```
+
+The **only** thing that wipes config is a **full-chip erase**. Avoid these two and
+your provisioning survives:
+
+- **Arduino IDE:** **Tools → Erase All Flash Before Sketch Upload** must be
+  **Disabled** (the default). Then just **Upload** the sketch as usual — same as any
+  normal build from the IDE-settings table above.
+- **arduino-cli:** the default `upload` does **not** erase NVS — use the exact command
+  from the *Build & upload from the command line* section above. Do **not** add an
+  erase step (`esptool.py erase_flash`); that nukes NVS and forces re-provisioning.
+
+> **Keep the partition scheme identical between flashes.** NVS sits at a fixed offset
+> (`0x9000`) only for a given partition table. If you switch schemes, the new table can
+> move NVS and your saved config becomes unreadable — effectively a config reset. Stay
+> on the OTA-capable `app3M_fat9M_16MB` scheme (IDE: *16M Flash (3MB APP/9.9MB FATFS)*)
+> used everywhere here.
+
+After the flash the device boots straight back onto your network with the same token —
+no re-provisioning needed. (To *deliberately* wipe config and move to another network,
+use the BOOT-button reset below instead.)
+
+## Changing WiFi — re-provisioning (BOOT-button config reset)
+
+OTA above deliberately **keeps** your credentials. This is the opposite: when you need
+to move the device to a **different WiFi network** (or hand it to someone else), wipe the
+stored WiFi SSID/password + Blynk auth token and re-run provisioning. **Same firmware, no
+re-flash** — you just re-enter the network from the Blynk app afterwards.
+
+**How:** with the device powered and running normally, **press and hold the BOOT button
+(GPIO0) for ~10 seconds, then release.** The reset fires *on release*.
+
+- Watch the onboard **WS2812 LED** for the cue: after ~3 s it starts a slow **white
+  wave**, and at ~5 s it switches to a fast **white blink** — once you see the blink
+  you've held long enough; release to reset. Holding the full ~10 s (as the device's own
+  serial prompt suggests) is just a safe margin.
+- On release the device clears its stored WiFi + auth token from NVS, reboots, and comes
+  back up in **provisioning (AP) mode**. Reconnect from the Blynk app to enter the new
+  network's credentials.
+
+> **It only triggers on release after the hold.** The action threshold is
+> `BUTTON_HOLD_TIME_ACTION` (5 s) in `Settings.h`; `ResetButton.h` calls the reset only
+> when you let go *after* that hold, so a brief accidental tap (< 5 s) never wipes
+> anything.
+
+> **Not the same as download mode.** This reset is done with the device already running.
+> The flashing combo from the USB sections — hold **BOOT**, tap **RST**, release **BOOT** —
+> holds BOOT *across a reset* to force the bootloader, and does **not** touch your config.
 
 ---
 
