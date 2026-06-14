@@ -1,14 +1,18 @@
-// RelayController — one watering relay/pump, with a hard guarantee that the pin is
-// NEVER HIGH longer than MAX_RUNNING_TIME_S (300 s).
+// RelayController — one watering relay/pump, with a hard guarantee that the relay is
+// NEVER energized longer than MAX_RUNNING_TIME_S (300 s).
+//
+// Polarity: the fitted modules are opto-isolated, ACTIVE-LOW, so "energized" means
+// the pin is driven to RELAY_ON_LEVEL (LOW) and "off" means RELAY_OFF_LEVEL (HIGH).
+// All pin writes go through those two constants — see the polarity block below.
 //
 // Safe-protocol (3 independent layers, all enforced here so they can never drift
 // apart from the constants that define them):
 //   1. Every requested duration is clamped to MAX_RUNNING_TIME_S in _start_timers(),
 //      and the manual Running Time slider (V1/V5) is clamped in _handle_run_time().
 //   2. A BlynkTimer software stop fires at the intended duration (_cb_stop) and a
-//      software backstop in run() forces the pin LOW at _hard_cap_ms.
+//      software backstop in run() forces the relay OFF at _hard_cap_ms.
 //   3. A hardware-backed esp_timer (priority-22 task, independent of loop()) forces
-//      the pin LOW even if loop() is blocked during a WiFi/Blynk reconnect. Its
+//      the relay OFF even if loop() is blocked during a WiFi/Blynk reconnect. Its
 //      deadline is itself clamped to the ceiling, so layer 3 is the last word.
 //
 // One instance per relay; index 0 -> GPIO38/V0.., index 1 -> GPIO39/V4.. .
@@ -27,13 +31,42 @@
 // ------------------------------------------------------------------ //
 //  GPIO38 / GPIO39 are free general-purpose pins on this N16R8 board:
 //  they are clear of the octal-PSRAM data lines (GPIO35-37) and are only
-//  labelled SD_CMD / SD_CLK (used by the unused on-board SD slot). HIGH = on.
+//  labelled SD_CMD / SD_CLK (used by the unused on-board SD slot).
 static const uint8_t RELAY_GPIO[2] = {38, 39};
+
+// ------------------------------------------------------------------ //
+//  Relay drive polarity                                                //
+// ------------------------------------------------------------------ //
+//  The fitted modules are OPTO-ISOLATED, ACTIVE-LOW ("low pull, high release"):
+//  IN LOW energizes the coil, IN HIGH *or floating* releases it. Verified on the
+//  hardware: IN->3V3 = OFF, IN floating = OFF, IN->GND = ON.
+//
+//  This polarity is also the safe one through boot: GPIO38/39 come up high-impedance,
+//  and an active-low opto input can only energize when the MCU actively SINKS current
+//  — which a floating pin cannot do — so the relay stays OFF for the whole ~0.5 s boot
+//  window (confirmed: the pump releases during a reset). begin() then drives the OFF
+//  level BEFORE switching the pin to OUTPUT, so it never glitches through the LOW that
+//  the reset-default latch (0) would otherwise produce.
+//
+//  Set RELAY_ACTIVE_HIGH to 1 only if you swap to active-high modules. Every pin write
+//  goes through RELAY_ON_LEVEL / RELAY_OFF_LEVEL, so this one switch keeps _enable,
+//  _disable, the failsafe, and the glitch-free init all consistent.
+#ifndef RELAY_ACTIVE_HIGH
+#define RELAY_ACTIVE_HIGH  0
+#endif
+
+#if RELAY_ACTIVE_HIGH
+static const uint8_t RELAY_ON_LEVEL  = HIGH;
+static const uint8_t RELAY_OFF_LEVEL = LOW;
+#else
+static const uint8_t RELAY_ON_LEVEL  = LOW;
+static const uint8_t RELAY_OFF_LEVEL = HIGH;
+#endif
 
 // ------------------------------------------------------------------ //
 //  Run-time ceiling — the heart of the safe-protocol                   //
 // ------------------------------------------------------------------ //
-static const uint32_t MAX_RUNNING_TIME_S = 300;    // absolute ceiling, seconds — the pin is NEVER HIGH longer than this
+static const uint32_t MAX_RUNNING_TIME_S = 300;    // absolute ceiling, seconds — the relay is NEVER energized longer than this
 static const uint32_t FAILSAFE_MARGIN_MS = 2000;   // grace so the normal timer wins before the failsafe trips
 
 class RelayController {
@@ -59,6 +92,11 @@ public:
     fs_args.name            = "relay_failsafe";
     esp_timer_create(&fs_args, &_failsafe_timer);
 
+    // Glitch-free init: latch the OFF level BEFORE enabling the output driver. The
+    // ESP32's reset default for the output latch is 0 (LOW); on an active-low module a
+    // momentary LOW would be a brief pump pulse. Writing the level first, then turning
+    // the pin into an OUTPUT, drives it straight to OFF with no LOW excursion.
+    digitalWrite(_gpio, RELAY_OFF_LEVEL);
     pinMode(_gpio, OUTPUT);
     _disable_relay();
 
@@ -78,7 +116,7 @@ public:
   void run() {
     _timer.run();
 
-    // The hardware failsafe already forced the pin LOW from its own task.
+    // The hardware failsafe already forced the relay OFF from its own task.
     // Reconcile bookkeeping and notify Blynk here, in loop context.
     if (_failsafe_tripped) {
       _failsafe_tripped = false;
@@ -143,7 +181,7 @@ private:
   // ---------- relay hardware ----------
 
   void _enable_relay() {
-    digitalWrite(_gpio, HIGH);
+    digitalWrite(_gpio, RELAY_ON_LEVEL);
     _relay_on = true;
   }
 
@@ -155,8 +193,8 @@ private:
   }
 
   void _disable_relay() {
-    esp_timer_stop(_failsafe_timer);   // disarm failsafe whenever the pin goes LOW
-    digitalWrite(_gpio, LOW);
+    esp_timer_stop(_failsafe_timer);   // disarm failsafe whenever the relay goes OFF
+    digitalWrite(_gpio, RELAY_OFF_LEVEL);
     _relay_on = false;
   }
 
@@ -164,7 +202,7 @@ private:
   // blocked during a WiFi/Blynk reconnect. Kills the pump immediately.
   static void _failsafe_cb(void *ctx) {
     RelayController *rc = (RelayController *)ctx;
-    digitalWrite(rc->_gpio, LOW);
+    digitalWrite(rc->_gpio, RELAY_OFF_LEVEL);
     rc->_failsafe_tripped = true;   // loop() reconciles state + tells Blynk
   }
 
@@ -193,7 +231,7 @@ private:
     _last_elapsed_s = 0;
 
     // Backstop fires a little past the intended stop, but is itself clamped
-    // to the ceiling — so the pin is never HIGH beyond MAX_RUNNING_TIME_S.
+    // to the ceiling — so the relay is never energized beyond MAX_RUNNING_TIME_S.
     _hard_cap_ms = duration_ms + FAILSAFE_MARGIN_MS;
     if (_hard_cap_ms > max_ms) _hard_cap_ms = max_ms;
 
