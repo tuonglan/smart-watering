@@ -17,6 +17,14 @@
 #define BOARD_LED_PIN_WS2812          48        // onboard addressable RGB LED
 #define BOARD_LED_BRIGHTNESS          64
 
+// Watchdog heartbeat: a ~2 Hz square wave to the external Arduino Nano guardian
+// (see nano-watchdog/). Driven from loop(), so it is tied to loop() actually
+// running: if this firmware fails to start (the cold-boot strap fault) or wedges,
+// the edges stop and the Nano pulses our EN/CHIP_PU pin to force a clean restart.
+// GPIO21 is a plain GPIO on this board — free (relays 38/39, moisture 4/5/6,
+// LED 48, button 0, USB 19/20, UART 43/44 are the only pins otherwise in use).
+#define WATCHDOG_HEARTBEAT_PIN        21
+
 
 /*
  * Advanced options (required by the Edgent helper files — keep all of these)

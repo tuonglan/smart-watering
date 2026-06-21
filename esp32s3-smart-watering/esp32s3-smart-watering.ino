@@ -377,6 +377,11 @@ void setup() {
   relays[0].begin(0);
   relays[1].begin(1);
 
+  // Watchdog heartbeat line — start it as early as possible so the Nano guardian
+  // (nano-watchdog/) sees us come alive quickly after a reset. See loop().
+  pinMode(WATCHDOG_HEARTBEAT_PIN, OUTPUT);
+  digitalWrite(WATCHDOG_HEARTBEAT_PIN, LOW);
+
   boot_ms = millis();
   schedMgr.begin(onScheduleTrigger, nullptr);
 
@@ -401,4 +406,19 @@ void loop() {
 
   relays[0].run();
   relays[1].run();
+
+  // Watchdog heartbeat: toggle GPIO21 at ~2 Hz (500 ms period). The external Nano
+  // guardian counts these edges; if it sees none for 3 consecutive 60 s windows it
+  // pulses our EN pin to force a clean restart. Because the toggle lives in loop(),
+  // it stops the instant loop() stops running — covering both a wedged firmware and
+  // the cold-boot strap fault where this sketch never starts at all (the pin then
+  // stays at the boot default and never toggles). See WATCHDOG_HEARTBEAT_PIN.
+  static uint32_t hb_last  = 0;
+  static bool     hb_level = false;
+  uint32_t hb_now = millis();
+  if (hb_now - hb_last >= 250) {
+    hb_last  = hb_now;
+    hb_level = !hb_level;
+    digitalWrite(WATCHDOG_HEARTBEAT_PIN, hb_level);
+  }
 }
