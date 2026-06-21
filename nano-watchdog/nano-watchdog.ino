@@ -60,6 +60,16 @@ static const uint8_t STATUS_LED = LED_BUILTIN;  // D13 — blinks each check, fl
 static const uint32_t CHECK_INTERVAL_MS = 60000UL;
 static const uint8_t  MAX_STRIKES       = 3;
 
+// How often to print a live status line for each device (silence duration, edge count,
+// strikes). This is just chatter for the serial monitor — it does NOT trigger resets;
+// the per-window check above is the only thing that does. Lets you watch a device go
+// quiet in real time instead of waiting up to a full minute for the next check.
+static const uint32_t STATUS_INTERVAL_MS = 5000UL;
+
+// Once a device has been silent for this long, the status line escalates from a plain
+// report to a "WARNING" so a developing problem is obvious well before the reset fires.
+static const uint32_t SILENCE_WARN_MS = 30000UL;
+
 // A healthy device emits ~240 edges per 60 s window (2 Hz square wave). Requiring a
 // handful, not just one, rejects stray electrical noise from being read as "alive".
 static const uint16_t MIN_EDGES_PER_WINDOW = 4;
@@ -75,10 +85,12 @@ struct DeviceState {
   uint16_t edges;         // edges counted in the current window
   uint8_t  strikes;       // consecutive empty windows
   uint32_t resetCount;    // how many times we've reset this device (for logging)
+  uint32_t lastEdgeMs;    // millis() of the most recent edge — drives the silence report
 };
 
 static DeviceState dev[NUM_DEVICES];
-static uint32_t     lastCheckMs = 0;
+static uint32_t     lastCheckMs  = 0;
+static uint32_t     lastStatusMs = 0;
 
 // ------------------------------------------------------------------ //
 //  Reset — open-drain pulse on the ESP32 EN/CHIP_PU line               //
@@ -112,9 +124,11 @@ void setup() {
     dev[i].edges      = 0;
     dev[i].strikes    = 0;
     dev[i].resetCount = 0;
+    dev[i].lastEdgeMs = millis();   // assume alive at boot; the first window proves it
   }
 
-  lastCheckMs = millis();   // first evaluation is one full window from now (boot grace)
+  lastCheckMs  = millis();   // first evaluation is one full window from now (boot grace)
+  lastStatusMs = millis();
 
   Serial.println();
   Serial.println(F("nano-watchdog: guardian online"));
@@ -135,12 +149,37 @@ void loop() {
   for (uint8_t i = 0; i < NUM_DEVICES; i++) {
     bool level = digitalRead(HEARTBEAT_PIN[i]);
     if (level != dev[i].lastLevel) {
-      dev[i].lastLevel = level;
+      dev[i].lastLevel  = level;
+      dev[i].lastEdgeMs = now;
       if (dev[i].edges < 0xFFFF) dev[i].edges++;
     }
   }
 
-  // 2) Once per window, judge each device on the edges it produced.
+  // 2) Frequent status chatter (does not trigger resets). Shows, per device, how long
+  //    it has been since the last edge and how many edges this window has — so you can
+  //    watch a device fall silent live instead of waiting for the 60 s check.
+  if (now - lastStatusMs >= STATUS_INTERVAL_MS) {
+    lastStatusMs = now;
+    for (uint8_t i = 0; i < NUM_DEVICES; i++) {
+      uint32_t silentMs = now - dev[i].lastEdgeMs;
+      Serial.print(F("  dev")); Serial.print(i);
+      Serial.print(F(": edges=")); Serial.print(dev[i].edges);
+      Serial.print(F(" lastSeen=")); Serial.print(silentMs / 1000); Serial.print(F("s ago"));
+      if (dev[i].strikes) { Serial.print(F(" strikes=")); Serial.print(dev[i].strikes); }
+      if (silentMs >= SILENCE_WARN_MS) {
+        Serial.print(F("  *** WARNING: SILENT for "));
+        Serial.print(silentMs / 1000);
+        Serial.print(F("s — reset in ~"));
+        // Rough countdown: strikes already banked + the windows still needed.
+        uint32_t winLeft = (MAX_STRIKES > dev[i].strikes) ? (MAX_STRIKES - dev[i].strikes) : 0;
+        Serial.print((winLeft * CHECK_INTERVAL_MS) / 1000);
+        Serial.print(F("s ***"));
+      }
+      Serial.println();
+    }
+  }
+
+  // 3) Once per window, judge each device on the edges it produced.
   if (now - lastCheckMs >= CHECK_INTERVAL_MS) {
     lastCheckMs = now;
 
