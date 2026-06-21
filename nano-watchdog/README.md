@@ -74,6 +74,39 @@ Power it from the **same supply** as the ESP32 boards so it cycles with them:
 - **Preferred:** feed regulated **5 V → Nano `5V` pin** (bypasses the Nano's regulator).
 - **Or:** feed **12 V → Nano `VIN`** (onboard regulator handles 7–12 V; runs a bit warm).
 
+## Serial logging
+
+The guardian prints a startup banner, a per-device status line every 5 s, the
+per-window `ALIVE`/`SILENT`/`strike` checks, and every reset event — all at **115200**.
+There are two ways to read it:
+
+### Option A — onboard USB (simplest)
+The Nano's USB port **is** the UART: D0/D1 are wired internally to the onboard
+USB-serial chip. Just plug in the Nano's USB cable and open the serial monitor at
+**115200**. Nothing extra to wire. This is the normal way to watch it on a PC.
+
+### Option B — external USB-TTL adapter on D0/D1
+Use this only if the deployed Nano isn't plugged into a PC by its own USB and you want
+to tap the logs with a separate adapter. Two wires are enough (read-only):
+
+| USB-TTL adapter | → | Nano pin       |
+|-----------------|---|----------------|
+| **RXD**         | ← | **D1 (TX1)**   |
+| **GND**         | ↔ | **GND**        |
+| TXD             |   | leave off (the sketch ignores serial input) |
+| VCC / 5 V       |   | **do NOT connect** (Nano is powered separately) |
+
+- **RX-to-TX crossover:** the adapter *receives*, so its **RXD** goes to the Nano's
+  **TX1 (D1)** — not TX-to-TX.
+- **Set the adapter to 5 V logic** — the Nano's TX1 swings 0–5 V (unlike the 3.3 V
+  ESP32), so a 3.3 V-only input may misread or be stressed.
+- Common ground is mandatory; **115200** baud.
+- Don't have the onboard USB **and** an external adapter both *driving* D0 at once —
+  they'd fight. Read-only (only RXD↔TX1 wired, as above) is fine, you're just listening.
+
+> Either way, leave D0/D1 out of the watchdog wiring itself — they're for logging only.
+> The guardian talks to the ESP32s over the heartbeat (D2/D3) and reset (D4/D5) lines.
+
 ## Timing you'll observe
 
 - **After a long outage:** both boards power up together. If an ESP32 fails its cold boot,
