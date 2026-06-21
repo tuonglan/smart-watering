@@ -50,7 +50,7 @@
 // ~1 s so short runs are not missed. See Moisture.h for the V11 string format and
 // monitoring/ for the broker + exporter stack.
 
-#define BLYNK_FIRMWARE_VERSION  "1.5.0"
+#define BLYNK_FIRMWARE_VERSION  "1.6.0"
 #define BLYNK_PRINT             Serial
 #define APP_DEBUG
 
@@ -377,10 +377,10 @@ void setup() {
   relays[0].begin(0);
   relays[1].begin(1);
 
-  // Watchdog heartbeat line — start it as early as possible so the Nano guardian
-  // (nano-watchdog/) sees us come alive quickly after a reset. See loop().
-  pinMode(WATCHDOG_HEARTBEAT_PIN, OUTPUT);
-  digitalWrite(WATCHDOG_HEARTBEAT_PIN, LOW);
+  // Watchdog heartbeat UART — start it as early as possible so the Nano guardian
+  // (nano-watchdog/) sees us come alive quickly after a reset. GPIO21 TX only;
+  // the Nano receives "HB\n" every 2 s and rejects boot-ROM noise at 115200 baud.
+  Serial2.begin(9600, SERIAL_8N1, -1, WATCHDOG_HEARTBEAT_PIN);  // TX-only (RX=-1)
 
   boot_ms = millis();
   schedMgr.begin(onScheduleTrigger, nullptr);
@@ -407,18 +407,15 @@ void loop() {
   relays[0].run();
   relays[1].run();
 
-  // Watchdog heartbeat: toggle GPIO21 at ~2 Hz (500 ms period). The external Nano
-  // guardian counts these edges; if it sees none for 3 consecutive 60 s windows it
-  // pulses our EN pin to force a clean restart. Because the toggle lives in loop(),
-  // it stops the instant loop() stops running — covering both a wedged firmware and
-  // the cold-boot strap fault where this sketch never starts at all (the pin then
-  // stays at the boot default and never toggles). See WATCHDOG_HEARTBEAT_PIN.
-  static uint32_t hb_last  = 0;
-  static bool     hb_level = false;
+  // Watchdog heartbeat: send "HB\n" via Serial2 (GPIO21) every 2 s. The Nano guardian
+  // accepts ONLY this exact token — boot-ROM output at 115200 baud is unreadable noise
+  // at the Nano's 9600, so a boot-looping device can never fake a healthy heartbeat.
+  // Sending stops the instant loop() stops running, covering both wedged firmware and
+  // the cold-boot strap fault where this sketch never starts at all.
+  static uint32_t hb_last = 0;
   uint32_t hb_now = millis();
-  if (hb_now - hb_last >= 250) {
-    hb_last  = hb_now;
-    hb_level = !hb_level;
-    digitalWrite(WATCHDOG_HEARTBEAT_PIN, hb_level);
+  if (hb_now - hb_last >= 2000) {
+    hb_last = hb_now;
+    Serial2.println("HB");
   }
 }

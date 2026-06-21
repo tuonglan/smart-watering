@@ -17,15 +17,32 @@
  *
  * HOW IT WORKS
  * ------------
- *   - Each ESP32-S3 toggles a "heartbeat" GPIO (GPIO21) at ~2 Hz while its loop() runs.
- *   - The Nano counts edges on that line. Every CHECK_INTERVAL it asks: did this device
- *     produce a healthy stream of edges in the last window?
- *       * yes -> the device is alive, clear its strike count.
+ *   - Each ESP32-S3 sends the string "HB\n" over UART at 9600 baud (GPIO21) every 2 s
+ *     while its loop() runs.
+ *   - The Nano listens on SoftwareSerial (D2 / D3), switching between devices every
+ *     LISTEN_SLOT_MS. When it receives the exact token "HB", it records the timestamp.
+ *   - Every CHECK_INTERVAL it asks: did this device send a valid heartbeat in the last
+ *     window?
+ *       * yes -> alive, clear its strike count.
  *       * no  -> one strike. After MAX_STRIKES consecutive empty windows the device is
  *                considered hung/never-booted, and the Nano pulses its reset.
  *   - Reset is OPEN-DRAIN: the Nano only ever pulls the ESP32 EN/CHIP_PU pin DOWN to GND
  *     (then releases to high-Z). It never drives 5 V onto the 3.3 V ESP32 — this is the
  *     same thing the physical reset button does, and it is safe across the voltage gap.
+ *
+ * WHY UART (not a square wave)
+ * ----------------------------
+ * Edge counting on a GPIO is fooled by a boot-looping device: the firmware briefly runs
+ * before each crash, toggles the pin a few times, and the Nano counts those as "alive".
+ * A UART string check is not: the ESP32 boot ROM spews its own output at 115200 baud,
+ * which SoftwareSerial (listening at 9600) sees only as framing noise — never "HB".
+ * Your specific token can only arrive from correctly-running application firmware.
+ *
+ * VOLTAGE COMPATIBILITY
+ * ---------------------
+ * ESP32 TX is 3.3 V logic. The 1 k series resistor + 100 k pulldown form a divider:
+ * when ESP32 drives HIGH the Nano sees 3.3 V × 100 k/(101 k) ≈ 3.27 V, above the
+ * ATmega's 3.0 V VIH threshold. No level shifter needed for this one-way link.
  *
  * FAIL-SAFE
  * ---------
@@ -33,75 +50,86 @@
  * never hold an ESP32 in reset. Worst case the guardian does nothing and you are back to
  * today's behaviour (manual reset) — it only ever ADDS a recovery path.
  *
- * WIRING — see README.md in this directory. In short, per device:
- *   ESP32 GPIO21 --[1k]--> Nano HB pin , and a 100k pulldown from that Nano pin to GND
- *   Nano RESET pin -------> ESP32 EN/CHIP_PU node (the non-GND side of its reset button)
- *   ALL grounds common (Nano GND <-> both ESP32 GNDs <-> supply GND).
+ * WIRING (per device, unchanged from the edge-counting version)
+ * -----
+ *   ESP32 GPIO21 (TX) --[1k]--> Nano D2 (dev0) or D3 (dev1)
+ *   100k pulldown from that Nano pin to GND  (keeps line LOW when ESP32 is off)
+ *   Nano D4 (dev0) or D5 (dev1) --> ESP32 EN/CHIP_PU (open-drain reset)
+ *   ALL grounds common (Nano GND <-> both ESP32 GNDs <-> supply GND)
  */
+
+#include <SoftwareSerial.h>
 
 // ------------------------------------------------------------------ //
 //  Configuration                                                       //
 // ------------------------------------------------------------------ //
 static const uint8_t NUM_DEVICES = 2;
 
-// Heartbeat INPUTs (one per ESP32). D2/D3 are interrupt-capable but we poll.
-// Do NOT enable the internal pull-up on these — it pulls to 5 V and would back-feed
-// the 3.3 V ESP32 when it is powered off. Use the external 100k pulldown instead.
-static const uint8_t HEARTBEAT_PIN[NUM_DEVICES] = { 2, 3 };
+// Heartbeat RX pins (one per ESP32). These receive UART TX from the ESP32.
+// Internal pull-up is NOT enabled — it pulls to 5 V and would back-feed the
+// 3.3 V ESP32 when powered off. Use the external 100k pulldown to GND instead.
+static const uint8_t HB_RX_PIN[NUM_DEVICES]  = { 2, 3 };
 
 // Reset OUTPUTs (one per ESP32). Open-drain: OUTPUT-LOW to reset, INPUT to release.
-static const uint8_t RESET_PIN[NUM_DEVICES]     = { 4, 5 };
+static const uint8_t RESET_PIN[NUM_DEVICES]  = { 4, 5 };
 
-static const uint8_t STATUS_LED = LED_BUILTIN;  // D13 — blinks each check, flashes on reset
+static const uint8_t STATUS_LED = LED_BUILTIN;   // D13
+
+// Heartbeat UART baud rate. 9600 is plenty for a 3-byte "HB\n" every 2 s.
+static const uint16_t HB_BAUD = 9600;
+
+// Listener slot: how long to listen to one device before switching to the other.
+// Must be longer than one heartbeat period (2 s) so we're guaranteed to see a
+// message if the device is alive; 3 s gives one full period of headroom.
+static const uint32_t LISTEN_SLOT_MS = 3000UL;
 
 // Detection window. The user's rule: "check every 60 s, reset after 3 misses."
-// 3 empty windows ~= 180 s, which also gives a freshly reset device plenty of time to
-// boot and start its own heartbeat before it could be struck again.
 static const uint32_t CHECK_INTERVAL_MS = 60000UL;
 static const uint8_t  MAX_STRIKES       = 3;
 
-// How often to print a live status line for each device (silence duration, edge count,
-// strikes). This is just chatter for the serial monitor — it does NOT trigger resets;
-// the per-window check above is the only thing that does. Lets you watch a device go
-// quiet in real time instead of waiting up to a full minute for the next check.
+// How often to print a live status line (silence duration + strikes).
 static const uint32_t STATUS_INTERVAL_MS = 5000UL;
 
-// Once a device has been silent for this long, the status line escalates from a plain
-// report to a "WARNING" so a developing problem is obvious well before the reset fires.
+// Once a device has been silent this long, escalate to WARNING in the log.
 static const uint32_t SILENCE_WARN_MS = 30000UL;
 
-// A healthy device emits ~240 edges per 60 s window (2 Hz square wave). Requiring a
-// handful, not just one, rejects stray electrical noise from being read as "alive".
-static const uint16_t MIN_EDGES_PER_WINDOW = 4;
-
-// How long to hold EN low. The ESP32 needs only a few ms; 200 ms is comfortable margin.
+// How long to hold EN low. The ESP32 needs only a few ms; 200 ms is comfortable.
 static const uint16_t RESET_PULSE_MS = 200;
 
 // ------------------------------------------------------------------ //
 //  Per-device state                                                    //
 // ------------------------------------------------------------------ //
 struct DeviceState {
-  bool     lastLevel;     // last sampled heartbeat level, for edge detection
-  uint16_t edges;         // edges counted in the current window
-  uint8_t  strikes;       // consecutive empty windows
-  uint32_t resetCount;    // how many times we've reset this device (for logging)
-  uint32_t lastEdgeMs;    // millis() of the most recent edge — drives the silence report
+  uint8_t  strikes;
+  uint32_t resetCount;
+  uint32_t lastValidMs;   // millis() when last valid "HB" token was received
 };
 
 static DeviceState dev[NUM_DEVICES];
-static uint32_t     lastCheckMs  = 0;
-static uint32_t     lastStatusMs = 0;
+static uint32_t    lastCheckMs  = 0;
+static uint32_t    lastStatusMs = 0;
+static uint32_t    lastSwitchMs = 0;
+static uint8_t     activeIdx    = 0;   // which device is currently being listened to
+
+// Two SoftwareSerial instances, TX disabled (255 = no TX pin).
+// Only one may .listen() at a time — we alternate.
+static SoftwareSerial ss0(HB_RX_PIN[0], 255);
+static SoftwareSerial ss1(HB_RX_PIN[1], 255);
+static SoftwareSerial *const ss[2] = { &ss0, &ss1 };
+
+// Single line buffer — only needs to hold the active device's current line.
+static char    lineBuf[16];
+static uint8_t lineLen = 0;
 
 // ------------------------------------------------------------------ //
 //  Reset — open-drain pulse on the ESP32 EN/CHIP_PU line               //
 // ------------------------------------------------------------------ //
 static void pulseReset(uint8_t i) {
-  digitalWrite(RESET_PIN[i], LOW);    // ensure the latch is LOW before we drive...
-  pinMode(RESET_PIN[i], OUTPUT);      // ...so enabling the driver pulls EN straight to GND
+  digitalWrite(RESET_PIN[i], LOW);    // ensure latch is LOW before driving
+  pinMode(RESET_PIN[i], OUTPUT);      // enabling the driver pulls EN straight to GND
   delay(RESET_PULSE_MS);
-  pinMode(RESET_PIN[i], INPUT);       // release to high-Z; the ESP32's pull-up restores EN
+  pinMode(RESET_PIN[i], INPUT);       // release to high-Z; ESP32 pull-up restores EN
 
-  // Quick triple-flash so the event is visible on the onboard LED too.
   for (uint8_t f = 0; f < 3; f++) {
     digitalWrite(STATUS_LED, HIGH); delay(60);
     digitalWrite(STATUS_LED, LOW);  delay(60);
@@ -117,24 +145,26 @@ void setup() {
   pinMode(STATUS_LED, OUTPUT);
   digitalWrite(STATUS_LED, LOW);
 
+  uint32_t now = millis();
   for (uint8_t i = 0; i < NUM_DEVICES; i++) {
-    pinMode(HEARTBEAT_PIN[i], INPUT);   // no pull-up (see note above)
-    pinMode(RESET_PIN[i], INPUT);       // released (high-Z) — fail-safe idle
-    dev[i].lastLevel  = digitalRead(HEARTBEAT_PIN[i]);
-    dev[i].edges      = 0;
-    dev[i].strikes    = 0;
-    dev[i].resetCount = 0;
-    dev[i].lastEdgeMs = millis();   // assume alive at boot; the first window proves it
+    pinMode(RESET_PIN[i], INPUT);   // released (high-Z) — fail-safe idle
+    dev[i].strikes     = 0;
+    dev[i].resetCount  = 0;
+    dev[i].lastValidMs = now;       // assume alive at boot; first window proves it
   }
 
-  lastCheckMs  = millis();   // first evaluation is one full window from now (boot grace)
-  lastStatusMs = millis();
+  ss0.begin(HB_BAUD);
+  ss1.begin(HB_BAUD);
+  ss[activeIdx]->listen();
+
+  lastCheckMs = lastStatusMs = lastSwitchMs = now;
 
   Serial.println();
   Serial.println(F("nano-watchdog: guardian online"));
-  Serial.print(F("  devices: "));        Serial.println(NUM_DEVICES);
-  Serial.print(F("  window:  "));        Serial.print(CHECK_INTERVAL_MS / 1000); Serial.println(F(" s"));
-  Serial.print(F("  strikes: "));        Serial.println(MAX_STRIKES);
+  Serial.print(F("  devices: "));   Serial.println(NUM_DEVICES);
+  Serial.print(F("  window:  "));   Serial.print(CHECK_INTERVAL_MS / 1000); Serial.println(F(" s"));
+  Serial.print(F("  strikes: "));   Serial.println(MAX_STRIKES);
+  Serial.print(F("  heartbeat: ")); Serial.print(HB_BAUD); Serial.println(F(" baud UART, token \"HB\""));
   Serial.println(F("  reset:   open-drain pulse on EN (safe for 3.3 V ESP32)"));
 }
 
@@ -144,33 +174,45 @@ void setup() {
 void loop() {
   uint32_t now = millis();
 
-  // 1) Continuously sample every heartbeat line and count edges. This must run far
-  //    faster than the heartbeat (2 Hz) so we never miss a transition.
-  for (uint8_t i = 0; i < NUM_DEVICES; i++) {
-    bool level = digitalRead(HEARTBEAT_PIN[i]);
-    if (level != dev[i].lastLevel) {
-      dev[i].lastLevel  = level;
-      dev[i].lastEdgeMs = now;
-      if (dev[i].edges < 0xFFFF) dev[i].edges++;
+  // 1) Drain the active SoftwareSerial into a line buffer, look for "HB".
+  //    Anything else (boot-ROM output, noise, partial lines) is silently discarded.
+  while (ss[activeIdx]->available()) {
+    char c = (char)ss[activeIdx]->read();
+    if (c == '\n' || c == '\r') {
+      lineBuf[lineLen] = '\0';
+      if (lineLen == 2 && lineBuf[0] == 'H' && lineBuf[1] == 'B') {
+        dev[activeIdx].lastValidMs = now;
+      }
+      lineLen = 0;
+    } else if (lineLen < (uint8_t)(sizeof(lineBuf) - 1)) {
+      lineBuf[lineLen++] = c;
+    } else {
+      lineLen = 0;   // line too long — discard and resync
     }
   }
 
-  // 2) Frequent status chatter (does not trigger resets). Shows, per device, how long
-  //    it has been since the last edge and how many edges this window has — so you can
-  //    watch a device fall silent live instead of waiting for the 60 s check.
+  // 2) Switch which device we're listening to every LISTEN_SLOT_MS.
+  //    lastValidMs persists across switches, so a heartbeat received in the
+  //    previous slot is still "fresh" when we come back.
+  if (now - lastSwitchMs >= LISTEN_SLOT_MS) {
+    lastSwitchMs = now;
+    lineLen  = 0;                                     // discard partial line
+    activeIdx = (activeIdx + 1) % NUM_DEVICES;
+    ss[activeIdx]->listen();
+  }
+
+  // 3) Frequent status chatter — shows silence duration and strikes per device.
   if (now - lastStatusMs >= STATUS_INTERVAL_MS) {
     lastStatusMs = now;
     for (uint8_t i = 0; i < NUM_DEVICES; i++) {
-      uint32_t silentMs = now - dev[i].lastEdgeMs;
+      uint32_t silentMs = now - dev[i].lastValidMs;
       Serial.print(F("  dev")); Serial.print(i);
-      Serial.print(F(": edges=")); Serial.print(dev[i].edges);
-      Serial.print(F(" lastSeen=")); Serial.print(silentMs / 1000); Serial.print(F("s ago"));
+      Serial.print(F(": lastSeen=")); Serial.print(silentMs / 1000); Serial.print(F("s ago"));
       if (dev[i].strikes) { Serial.print(F(" strikes=")); Serial.print(dev[i].strikes); }
       if (silentMs >= SILENCE_WARN_MS) {
         Serial.print(F("  *** WARNING: SILENT for "));
         Serial.print(silentMs / 1000);
         Serial.print(F("s — reset in ~"));
-        // Rough countdown: strikes already banked + the windows still needed.
         uint32_t winLeft = (MAX_STRIKES > dev[i].strikes) ? (MAX_STRIKES - dev[i].strikes) : 0;
         Serial.print((winLeft * CHECK_INTERVAL_MS) / 1000);
         Serial.print(F("s ***"));
@@ -179,18 +221,18 @@ void loop() {
     }
   }
 
-  // 3) Once per window, judge each device on the edges it produced.
+  // 4) Once per window, judge each device on whether it sent a valid heartbeat.
   if (now - lastCheckMs >= CHECK_INTERVAL_MS) {
     lastCheckMs = now;
 
-    // Slow blink to show the guardian itself is alive and checking.
     digitalWrite(STATUS_LED, HIGH); delay(20); digitalWrite(STATUS_LED, LOW);
 
     for (uint8_t i = 0; i < NUM_DEVICES; i++) {
-      bool alive = (dev[i].edges >= MIN_EDGES_PER_WINDOW);
+      uint32_t silentMs = now - dev[i].lastValidMs;
+      bool alive = (silentMs < CHECK_INTERVAL_MS);
 
       Serial.print(F("check dev")); Serial.print(i);
-      Serial.print(F(": edges=")); Serial.print(dev[i].edges);
+      Serial.print(F(": lastSeen=")); Serial.print(silentMs / 1000); Serial.print(F("s"));
       Serial.print(alive ? F(" ALIVE") : F(" SILENT"));
 
       if (alive) {
@@ -207,15 +249,11 @@ void loop() {
           Serial.print(F(": no heartbeat — pulsing RESET (#"));
           Serial.print(dev[i].resetCount); Serial.println(F(")"));
           pulseReset(i);
-          // Clear strikes so the freshly reset device gets a full fresh window-set
-          // (~180 s) to boot and start its heartbeat before it could be struck again.
           dev[i].strikes = 0;
         }
       }
-
-      dev[i].edges = 0;   // reset the counter for the next window
     }
   }
 
-  delay(2);   // ~500 samples/s — plenty for a 2 Hz heartbeat, easy on the CPU
+  // No delay — SoftwareSerial needs fast polling to drain its receive buffer.
 }
