@@ -1,0 +1,28 @@
+
+20:16:08.891 ->   dev0: edges=0 lastSeen=140s ago strikes=1  *** WARNING: SILENT for 140s — reset in ~120s ***
+20:16:08.891 ->   dev1: edges=5554 lastSeen=0s ago
+20:16:13.194 -> check dev0: edges=0 SILENT strike 2/3
+20:16:13.253 -> check dev1: edges=5987 ALIVE
+20:16:13.879 ->   dev0: edges=0 lastSeen=145s ago strikes=2  *** WARNING: SILENT for 145s — reset in ~60s ***
+20:16:13.912 ->   dev1: edges=68 lastSeen=0s ago
+20:16:18.902 ->   dev0: edges=0 lastSeen=150s ago strikes=2  *** WARNING: SILENT for 150s — reset in ~60s ***
+20:16:18.902 ->   dev1: edges=569 lastSeen=0s ago
+20:16:23.881 ->   dev0: edges=0 lastSeen=155s ago strikes=2  *** WARNING: SILENT for 155s — reset in ~60s ***
+20:16:23.919 ->   dev1: edges=1071 lastSeen=0s ago
+20:16:28.896 ->   dev0: edges=0 lastSeen=160s ago strikes=2  *** WARNING: SILENT for 160s — reset in ~60s ***
+20:16:28.896 ->   dev1: edges=1570 lastSeen=0s ago
+20:16:33.902 ->   dev0: edges=0 lastSeen=165s ago strikes=2  *** WARNING: SILENT for 165s — reset in ~60s ***
+20:16:33.902 ->   dev1: edges=2073 lastSeen=0s ago
+20:16:38.909 ->   dev0: edges=2 lastSeen=2s ago strikes=2
+20:16:38.909 ->   dev1: edges=2575 lastSeen=0s ago
+20:16:43.911 ->   dev0: edges=2 lastSeen=7s ago strikes=2
+20:16:43.911 ->   dev1: edges=3079 lastSeen=0s ago
+20:16:48.890 ->   dev0: edges=4 lastSeen=3s ago strikes=2
+20:16:48.922 ->   dev1: edges=3581 lastSeen=0s ago
+20:16:53.903 ->   dev0: edges=6 lastSeen=0s ago strikes=2
+20:16:53.903 ->   dev1: edges=4084 lastSeen=0s ago
+20:16:58.925 ->   dev0: edges=6 lastSeen=5s ago strikes=2
+20:16:58.925 ->   dev1: edges=4587 lastSeen=0s ago
+20:17:03.911 ->   dev0: edges=8 lastSeen=4s ago strikes=2
+20:17:03.911 ->   dev1: edges=5089 lastSeen=0s ago
+20:17:08.901 ->   dev0: edges=14 lastSeen=1s ago strikes=2
