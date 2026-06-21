@@ -1,0 +1,44 @@
+13:59:40.893 ->   devices: 2
+13:59:40.893 ->   window:  60 s
+13:59:40.893 ->   strikes: 3
+13:59:40.893 ->   reset:   open-drain pulse on EN (safe for 3.3 V ESP32)
+13:59:45.899 ->   dev0: edges=0 lastSeen=5s ago
+13:59:45.899 ->   dev1: edges=0 lastSeen=5s ago
+13:59:50.916 ->   dev0: edges=0 lastSeen=10s ago
+13:59:50.916 ->   dev1: edges=0 lastSeen=10s ago
+13:59:55.924 ->   dev0: edges=0 lastSeen=15s ago
+13:59:55.924 ->   dev1: edges=0 lastSeen=15s ago
+14:00:00.901 ->   dev0: edges=0 lastSeen=20s ago
+14:00:00.901 ->   dev1: edges=0 lastSeen=20s ago
+14:00:05.930 ->   dev0: edges=38 lastSeen=0s ago
+14:00:05.930 ->   dev1: edges=136 lastSeen=0s ago
+14:00:10.926 ->   dev0: edges=38 lastSeen=5s ago
+14:00:10.926 ->   dev1: edges=138 lastSeen=4s ago
+14:00:15.929 ->   dev0: edges=38 lastSeen=10s ago
+14:00:15.929 ->   dev1: edges=138 lastSeen=9s ago
+14:00:20.935 ->   dev0: edges=38 lastSeen=15s ago
+14:00:20.935 ->   dev1: edges=138 lastSeen=14s ago
+14:00:25.938 ->   dev0: edges=38 lastSeen=20s ago
+14:00:25.938 ->   dev1: edges=138 lastSeen=19s ago
+14:00:30.929 ->   dev0: edges=38 lastSeen=25s ago
+14:00:30.929 ->   dev1: edges=138 lastSeen=24s ago
+14:00:35.925 ->   dev0: edges=38 lastSeen=30s ago  *** WARNING: SILENT for 30s — reset in ~180s ***
+14:00:35.925 ->   dev1: edges=138 lastSeen=30s ago  *** WARNING: SILENT for 30s — reset in ~180s ***
+14:00:40.925 -> check dev0: edges=38 ALIVE
+14:00:40.925 -> check dev1: edges=138 ALIVE
+14:00:40.963 ->   dev0: edges=0 lastSeen=35s ago  *** WARNING: SILENT for 35s — reset in ~180s ***
+14:00:40.963 ->   dev1: edges=0 lastSeen=35s ago  *** WARNING: SILENT for 35s — reset in ~180s ***
+14:00:45.956 ->   dev0: edges=0 lastSeen=40s ago  *** WARNING: SILENT for 40s — reset in ~180s ***
+14:00:45.956 ->   dev1: edges=0 lastSeen=40s ago  *** WARNING: SILENT for 40s — reset in ~180s ***
+14:00:50.954 ->   dev0: edges=0 lastSeen=45s ago  *** WARNING: SILENT for 45s — reset in ~180s ***
+14:00:50.954 ->   dev1: edges=0 lastSeen=45s ago  *** WARNING: SILENT for 45s — reset in ~180s ***
+14:00:55.956 ->   dev0: edges=0 lastSeen=50s ago  *** WARNING: SILENT for 50s — reset in ~180s ***
+14:00:55.956 ->   dev1: edges=0 lastSeen=50s ago  *** WARNING: SILENT for 50s — reset in ~180s ***
+14:01:00.937 ->   dev0: edges=0 lastSeen=55s ago  *** WARNING: SILENT for 55s — reset in ~180s ***
+14:01:00.977 ->   dev1: edges=0 lastSeen=55s ago  *** WARNING: SILENT for 55s — reset in ~180s ***
+14:01:05.956 ->   dev0: edges=0 lastSeen=60s ago  *** WARNING: SILENT for 60s — reset in ~180s ***
+14:01:05.956 ->   dev1: edges=0 lastSeen=60s ago  *** WARNING: SILENT for 60s — reset in ~180s ***
+14:01:10.946 ->   dev0: edges=0 lastSeen=65s ago  *** WARNING: SILENT for 65s — reset in ~180s ***
+14:01:10.946 ->   dev1: edges=0 lastSeen=65s ago  *** WARNING: SILENT for 65s — reset in ~180s ***
+14:01:15.949 ->   dev0: edges=0 lastSeen=70s ago  *** WARNING: SILENT for 70s — reset in ~180s ***
+14:01:15.949 ->   dev1: edges=0 lastSeen=70s ago  *** WARNING: SILENT for 70s — reset in ~180s ***
