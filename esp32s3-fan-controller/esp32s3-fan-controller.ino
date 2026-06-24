@@ -36,8 +36,8 @@
 
 #define USE_ESP32S3_DEV_MODULE
 
-#define BLYNK_TEMPLATE_ID   ""          // Fill in from your Blynk console
-#define BLYNK_TEMPLATE_NAME "Fan Controller"
+#define BLYNK_TEMPLATE_ID "TMPL6PyORnvfe"
+#define BLYNK_TEMPLATE_NAME "Home Fan Controller"
 
 #include "Settings.h"
 #include "BlynkEdgent.h"
